@@ -1,0 +1,28 @@
+{
+  "watch_roots": [
+    "~/Documents",
+    "~/Projects"
+  ],
+  "include_patterns": [],
+  "exclude_patterns": [
+    "**/node_modules/**",
+    "**/.git/**",
+    "**/venv/**",
+    "**/.venv/**",
+    "**/__pycache__/**",
+    "**/.DS_Store",
+    "**/Thumbs.db"
+  ],
+  "blocked_extensions": [
+    ".pem",
+    ".key",
+    ".wallet",
+    ".keystore",
+    ".jks",
+    ".p12",
+    ".pfx",
+    ".env"
+  ],
+  "max_file_size_bytes": 104857600,
+  "follow_symlinks": false
+}

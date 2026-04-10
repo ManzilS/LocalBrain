@@ -1,0 +1,41 @@
+# ── Parser Plugins ──────────────────────────────────────
+#
+# Each entry declares a parser that the registry will discover and
+# instantiate on startup.  Set `enabled: false` to disable without
+# removing the config.  Settings are forwarded as kwargs to the
+# parser constructor.
+
+parsers:
+  text:
+    enabled: true
+    module: src.parsers.text_ext
+    settings:
+      max_file_size: 52428800   # 50 MB
+
+  pdf:
+    enabled: true
+    module: src.parsers.pdf_ext
+    settings: {}
+
+  office:
+    enabled: false
+    module: src.parsers.office_ext
+    settings: {}
+
+  image:
+    enabled: false
+    module: src.parsers.image_ext
+    settings: {}
+
+  audio:
+    enabled: false
+    module: src.parsers.audio_ext
+    settings: {}
+
+  archive:
+    enabled: true
+    module: src.parsers.archive_ext
+    settings:
+      max_unpack_size: 104857600  # 100 MB
+      max_depth: 3
+      max_files: 1000
