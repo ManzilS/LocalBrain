@@ -53,7 +53,7 @@ _ROLE_MAP = {
 class ClaudeParser(ParserBase):
     name = "claude"
     supported_mimes = ["application/json"]
-    lane = "heavy"
+    lane = "fast"
 
     async def can_parse(self, file_record: FileRecord) -> bool:
         low = file_record.identity.path.lower()

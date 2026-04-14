@@ -283,8 +283,8 @@ flowchart LR
     end
 
     EVT --> CL
-    CL -->|text/code| FAST
-    CL -->|pdf/office/AI convos| HEAVY
+    CL -->|text/code/AI convos| FAST
+    CL -->|pdf/office| HEAVY
     CL -->|image/audio/archive| BG
 
     FAST --> W1

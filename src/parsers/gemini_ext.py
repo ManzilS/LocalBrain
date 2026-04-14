@@ -40,7 +40,7 @@ _PLATFORM = "gemini"
 class GeminiParser(ParserBase):
     name = "gemini"
     supported_mimes = ["application/json", "text/html"]
-    lane = "heavy"
+    lane = "fast"
 
     async def can_parse(self, file_record: FileRecord) -> bool:
         low = file_record.identity.path.lower()

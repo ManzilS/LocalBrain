@@ -32,7 +32,7 @@ The server starts on `http://127.0.0.1:8090` by default.
 |                                                              |
 |  +----------+  +----------+  +----------+  +-------------+  |
 |  | ChatGPT  |  |  Claude  |  |  Gemini  |  |  Copilot /  |  |
-|  | (heavy)  |  | (heavy)  |  | (heavy)  |  | Perplexity  |  |
+|  | (fast)   |  | (fast)   |  | (fast)   |  | Perplexity  |  |
 |  +----------+  +----------+  +----------+  +-------------+  |
 +--------------------------------------------------------------+
 |  Phase 3 -- Semantic Chunking                                |
@@ -142,10 +142,10 @@ parsers:
 
 | Parser     | Platforms                        | Formats              | Lane  |
 |------------|----------------------------------|----------------------|-------|
-| chatgpt    | ChatGPT (OpenAI)                 | JSON, ZIP            | heavy |
-| claude     | Claude (Anthropic)               | JSON, ZIP            | heavy |
-| gemini     | Gemini / Bard (Google)           | JSON, HTML, ZIP      | heavy |
-| ai_generic | Copilot, Perplexity, and others  | JSON, Markdown, CSV  | heavy |
+| chatgpt    | ChatGPT (OpenAI)                 | JSON, ZIP            | fast  |
+| claude     | Claude (Anthropic)               | JSON, ZIP            | fast  |
+| gemini     | Gemini / Bard (Google)           | JSON, HTML, ZIP      | fast  |
+| ai_generic | Copilot, Perplexity, and others  | JSON, Markdown, CSV  | fast  |
 
 #### Importing AI Conversations
 
