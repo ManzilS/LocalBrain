@@ -2,8 +2,6 @@
 
 ## System Overview
 
-## System Overview
-
 ```mermaid
 flowchart LR
     subgraph External["External Systems"]
@@ -131,7 +129,7 @@ flowchart LR
     REIDX --> SQLITE
     REIDX --> SUBS
 
-    %% Styling (Added color:#000 for dark mode text contrast)
+    %% Styling
     classDef external fill:#f9f,stroke:#333,stroke-width:2px,color:#000
     classDef gateway fill:#bbf,stroke:#333,stroke-width:1px,color:#000
     classDef core fill:#fbb,stroke:#333,stroke-width:1px,color:#000
@@ -141,112 +139,6 @@ flowchart LR
     classDef vault fill:#fdb,stroke:#333,stroke-width:1px,color:#000
     classDef handoff fill:#dbf,stroke:#333,stroke-width:1px,color:#000
     classDef janitor fill:#ddd,stroke:#333,stroke-width:1px,color:#000
-
-    class FS,ROUTER,CLIENT external
-    class APP,MW_CTX,MW_AUTH,MW_CORS,ROUTES,ERR gateway
-    class ORCH,SCHED,PIPE,REG core
-    class WATCH,GATE,IDENT ingress
-    class TXT,PDF,OFF,IMG,AUD,ARC parser
-    class CDC,DEDUP,FP chunk
-    class SQLITE,LANCE,SUBS,REFS,SCHEMA vault
-    class BPQ,GWC handoff
-    class TOMB,SYNC,REIDX janitor
-
-    subgraph Chunking["Chunking Engine"]
-        CDC["CDC Chunker<br/>chunking/cdc.py"]
-        DEDUP["ChunkDeduplicator<br/>chunking/dedup.py"]
-        FP["Fingerprinter<br/>chunking/fingerprint.py"]
-    end
-
-    subgraph Vault["Dual Storage Vault"]
-        SQLITE["SQLiteEngine<br/>vault/sqlite_engine.py"]
-        LANCE["LanceEngine<br/>vault/lance_engine.py"]
-        SUBS["SubscriptionManager<br/>vault/subscriptions.py"]
-        REFS["RefCounter<br/>vault/ref_counting.py"]
-        SCHEMA["Schema DDL<br/>vault/schema.py"]
-    end
-
-    subgraph Handoff["Router Handoff"]
-        BPQ["BackpressureQueue<br/>backpressure_queue.py"]
-        GWC["GatewayClient<br/>gateway_client.py"]
-    end
-
-    subgraph Janitor["Maintenance"]
-        TOMB["TombstoneCascade<br/>janitor/tombstone.py"]
-        SYNC["JournalSync<br/>janitor/sync.py"]
-        REIDX["ReindexManager<br/>janitor/reindex.py"]
-    end
-
-    %% External connections
-    FS -->|OS events| WATCH
-    CLIENT -->|HTTP| APP
-    GWC <-->|embeddings/OCR| ROUTER
-
-    %% Gateway flow
-    APP --> MW_CTX --> MW_AUTH --> MW_CORS --> ROUTES
-    APP --> ERR
-    ROUTES --> ORCH
-
-    %% Core flow
-    ORCH --> WATCH
-    ORCH --> SCHED
-    ORCH --> PIPE
-    ORCH --> TOMB
-    ORCH --> SYNC
-    ORCH --> REIDX
-    SCHED --> PIPE
-
-    %% Ingress
-    WATCH --> GATE
-    WATCH --> IDENT
-    PIPE --> GATE
-    PIPE --> IDENT
-
-    %% Parsing
-    PIPE --> REG
-    REG --> TXT
-    REG --> PDF
-    REG --> OFF
-    REG --> IMG
-    REG --> AUD
-    REG --> ARC
-
-    %% Chunking
-    PIPE --> CDC
-    PIPE --> DEDUP
-    PIPE --> FP
-    CDC --> FP
-
-    %% Storage
-    PIPE --> SQLITE
-    PIPE --> SUBS
-    PIPE --> REFS
-    SQLITE --> SCHEMA
-    LANCE --> LANCE
-
-    %% Handoff
-    PIPE --> BPQ
-    BPQ --> GWC
-
-    %% Janitor
-    TOMB --> SQLITE
-    TOMB --> LANCE
-    TOMB --> SUBS
-    TOMB --> REFS
-    SYNC --> SQLITE
-    REIDX --> SQLITE
-    REIDX --> SUBS
-
-    %% Styling
-    classDef external fill:#f9f,stroke:#333,stroke-width:2px
-    classDef gateway fill:#bbf,stroke:#333,stroke-width:1px
-    classDef core fill:#fbb,stroke:#333,stroke-width:1px
-    classDef ingress fill:#bfb,stroke:#333,stroke-width:1px
-    classDef parser fill:#ffd,stroke:#333,stroke-width:1px
-    classDef chunk fill:#dff,stroke:#333,stroke-width:1px
-    classDef vault fill:#fdb,stroke:#333,stroke-width:1px
-    classDef handoff fill:#dbf,stroke:#333,stroke-width:1px
-    classDef janitor fill:#ddd,stroke:#333,stroke-width:1px
 
     class FS,ROUTER,CLIENT external
     class APP,MW_CTX,MW_AUTH,MW_CORS,ROUTES,ERR gateway
@@ -289,13 +181,13 @@ flowchart TD
     subgraph P3["Phase 3: CHUNK"]
         P3A["cdc_chunk() — Gear-hash + boundary snapping"]
         P3B["chunk_fingerprint() per chunk"]
-        P3C{"Deduplicator: is_duplicate?"}
+        P3C{"Deduplicator:<br/>is_duplicate?"}
         P3D["Skip duplicate chunk"]
         P3E["Create Chunk objects"]
     end
 
     subgraph P4["Phase 4: HANDOFF"]
-        P4A{"BackpressureQueue is_full?"}
+        P4A{"BackpressureQueue<br/>is_full?"}
         P4B["Enqueue HandoffRequest"]
         P4C["Log backpressure warning"]
     end
@@ -336,13 +228,13 @@ flowchart TD
     P5A --> P5B --> P5C --> P5D --> P5E --> P5F --> DONE
     P5A -.->|Exception| P5G -.-> ERR
 
-    style P1 fill:#e8f5e9,stroke:#2e7d32
-    style P2 fill:#e3f2fd,stroke:#1565c0
-    style P3 fill:#fff3e0,stroke:#e65100
-    style P4 fill:#f3e5f5,stroke:#6a1b9a
-    style P5 fill:#fce4ec,stroke:#b71c1c
-    style DONE fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
-    style ERR fill:#ffcdd2,stroke:#b71c1c,stroke-width:2px
+    style P1 fill:#e8f5e9,stroke:#2e7d32,color:#000
+    style P2 fill:#e3f2fd,stroke:#1565c0,color:#000
+    style P3 fill:#fff3e0,stroke:#e65100,color:#000
+    style P4 fill:#f3e5f5,stroke:#6a1b9a,color:#000
+    style P5 fill:#fce4ec,stroke:#b71c1c,color:#000
+    style DONE fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style ERR fill:#ffcdd2,stroke:#b71c1c,stroke-width:2px,color:#000
 ```
 
 ---
@@ -398,10 +290,10 @@ flowchart LR
     RT -->|Yes| BACK --> FAST & HEAVY & BG
     RT -->|No / Exhausted| DL
 
-    style FAST fill:#c8e6c9
-    style HEAVY fill:#fff9c4
-    style BG fill:#e1bee7
-    style DL fill:#ffcdd2
+    style FAST fill:#c8e6c9,color:#000
+    style HEAVY fill:#fff9c4,color:#000
+    style BG fill:#e1bee7,color:#000
+    style DL fill:#ffcdd2,color:#000
 ```
 
 ---
