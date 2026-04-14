@@ -39,3 +39,24 @@ parsers:
       max_unpack_size: 104857600  # 100 MB
       max_depth: 3
       max_files: 1000
+
+  # ── AI Platform Conversation Parsers ──────────────────
+  chatgpt:
+    enabled: true
+    module: src.parsers.chatgpt_ext
+    settings: {}
+
+  claude:
+    enabled: true
+    module: src.parsers.claude_ext
+    settings: {}
+
+  gemini:
+    enabled: true
+    module: src.parsers.gemini_ext
+    settings: {}
+
+  ai_generic:
+    enabled: true
+    module: src.parsers.ai_generic_ext
+    settings: {}
