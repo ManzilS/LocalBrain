@@ -135,11 +135,16 @@ class SQLiteEngine:
 
     async def purge_tombstones(self, older_than_days: int = 7) -> int:
         cutoff = time.time() - (older_than_days * 86400)
-        async with self.db.execute(
-            "DELETE FROM files WHERE status = 'tombstone' AND deleted_at < ?", (cutoff,)
-        ) as cur:
-            count = cur.rowcount
-        await self.db.commit()
+        await self.db.execute("BEGIN IMMEDIATE")
+        try:
+            async with self.db.execute(
+                "DELETE FROM files WHERE status = 'tombstone' AND deleted_at < ?", (cutoff,)
+            ) as cur:
+                count = cur.rowcount
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
         return count or 0
 
     # ── Chunk CRUD ──────────────────────────────────────

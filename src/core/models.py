@@ -97,11 +97,11 @@ class Chunk(BaseModel):
 
     id: str = Field(default_factory=_new_id)
     file_id: str = ""
-    sequence: int = 0
+    sequence: int = Field(default=0, ge=0)
     content: str = ""
     fingerprint: str = ""
-    byte_offset: int = 0
-    byte_length: int = 0
+    byte_offset: int = Field(default=0, ge=0)
+    byte_length: int = Field(default=0, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
     embedding: list[float] | None = None
 
@@ -118,7 +118,7 @@ class QueueItem(BaseModel):
     priority: int = 0
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: float = Field(default_factory=_now)
-    attempts: int = 0
+    attempts: int = Field(default=0, ge=0)
 
 
 # ── Router Handoff ──────────────────────────────────────

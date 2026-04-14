@@ -57,7 +57,11 @@ class OfficeParser(ParserBase):
         except ImportError:
             return ParseResult(content="", metadata={"error": "python-docx not installed"})
 
-        doc = Document(io.BytesIO(data))
+        try:
+            doc = Document(io.BytesIO(data))
+        except Exception as exc:
+            return ParseResult(content="", metadata={"error": f"corrupt_docx: {exc}"})
+
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         content = "\n\n".join(paragraphs)
         return ParseResult(
@@ -101,7 +105,10 @@ class OfficeParser(ParserBase):
         except ImportError:
             return ParseResult(content="", metadata={"error": "python-pptx not installed"})
 
-        prs = Presentation(io.BytesIO(data))
+        try:
+            prs = Presentation(io.BytesIO(data))
+        except Exception as exc:
+            return ParseResult(content="", metadata={"error": f"corrupt_pptx: {exc}"})
         slides_text: list[str] = []
         for i, slide in enumerate(prs.slides, 1):
             parts = [f"## Slide {i}"]
