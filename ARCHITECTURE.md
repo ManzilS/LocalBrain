@@ -32,13 +32,20 @@ graph TB
         IDENT["FileIdentityResolver<br/><i>ingress/identity.py</i>"]
     end
 
-    subgraph Parsers["Parser Plugins"]
+    subgraph Parsers["Document Parsers"]
         TXT["TextParser"]
         PDF["PdfParser"]
         OFF["OfficeParser"]
         IMG["ImageParser"]
         AUD["AudioParser"]
         ARC["ArchiveParser"]
+    end
+
+    subgraph AIParsers["AI Platform Parsers"]
+        GPT["ChatGPTParser<br/><i>chatgpt_ext.py</i>"]
+        CLD["ClaudeParser<br/><i>claude_ext.py</i>"]
+        GEM["GeminiParser<br/><i>gemini_ext.py</i>"]
+        GEN["AIGenericParser<br/><i>ai_generic_ext.py</i><br/>(Copilot, Perplexity)"]
     end
 
     subgraph Chunking["Chunking Engine"]
@@ -99,6 +106,10 @@ graph TB
     REG --> IMG
     REG --> AUD
     REG --> ARC
+    REG --> GPT
+    REG --> CLD
+    REG --> GEM
+    REG --> GEN
 
     %% Chunking
     PIPE --> CDC
@@ -142,6 +153,7 @@ graph TB
     class ORCH,SCHED,PIPE,REG core
     class WATCH,GATE,IDENT ingress
     class TXT,PDF,OFF,IMG,AUD,ARC parser
+    class GPT,CLD,GEM,GEN parser
     class CDC,DEDUP,FP chunk
     class SQLITE,LANCE,SUBS,REFS,SCHEMA vault
     class BPQ,GWC handoff
@@ -272,7 +284,7 @@ flowchart LR
 
     EVT --> CL
     CL -->|text/code| FAST
-    CL -->|pdf/office| HEAVY
+    CL -->|pdf/office/AI convos| HEAVY
     CL -->|image/audio/archive| BG
 
     FAST --> W1
@@ -461,7 +473,11 @@ LocalBrain/
 │   │   ├── office_ext.py       # DOCX, XLSX, PPTX
 │   │   ├── image_ext.py        # EXIF extraction (OCR via Router)
 │   │   ├── audio_ext.py        # Metadata stub (transcription via Router)
-│   │   └── archive_ext.py      # ZIP/TAR VFS sandbox
+│   │   ├── archive_ext.py      # ZIP/TAR VFS sandbox
+│   │   ├── chatgpt_ext.py      # ChatGPT conversations (tree linearisation)
+│   │   ├── claude_ext.py       # Claude conversations (linear messages)
+│   │   ├── gemini_ext.py       # Gemini/Bard (3 format variants + HTML)
+│   │   └── ai_generic_ext.py   # Copilot, Perplexity (JSON/MD/CSV)
 │   │
 │   ├── chunking/
 │   │   ├── cdc.py              # Gear-hash CDC + boundary snapping
@@ -493,14 +509,15 @@ LocalBrain/
 │       ├── errors.py           # 12-class error hierarchy
 │       └── logging.py          # Structured JSON logging
 │
-└── tests/                      # 200 tests across 27 files
+└── tests/                      # 285 tests across 31 files
     ├── test_chunking/          # CDC, dedup, fingerprint
     ├── test_core/              # Models, pipeline, scheduler, orchestrator, registry
-    ├── test_gateway/           # Server endpoints, error handling
+    ├── test_gateway/           # Server endpoints, error handling, middleware
     ├── test_ingress/           # Identity, scope gate, watcher
     ├── test_janitor/           # Tombstone, sync, reindex
-    ├── test_parsers/           # Text, PDF, office, image, audio, archive
+    ├── test_parsers/           # Text, PDF, office, image, audio, archive,
+    │                           # ChatGPT, Claude, Gemini, Copilot/Perplexity
     ├── test_router_handoff/    # Backpressure queue, gateway client
-    ├── test_utils/             # Config, logging
+    ├── test_utils/             # Config (with validation), logging
     └── test_vault/             # SQLite, LanceDB, ref counting, subscriptions
 ```
