@@ -3,7 +3,7 @@
 ## System Overview
 
 ```mermaid
-flowchart LR
+graph TB
     subgraph External["External Systems"]
         FS["File System<br/>(OS Events)"]
         ROUTER["Router App<br/>(AI Gateway)"]
@@ -11,25 +11,25 @@ flowchart LR
     end
 
     subgraph Gateway["Gateway Layer"]
-        APP["FastAPI App<br/>gateway/main.py"]
+        APP["FastAPI App<br/><i>gateway/main.py</i>"]
         MW_CTX["RequestContext<br/>Middleware"]
         MW_AUTH["Auth<br/>Middleware"]
         MW_CORS["CORS<br/>Middleware"]
-        ROUTES["API Routes<br/>gateway/server.py"]
-        ERR["Error Handler<br/>utils/errors.py"]
+        ROUTES["API Routes<br/><i>gateway/server.py</i>"]
+        ERR["Error Handler<br/><i>utils/errors.py</i>"]
     end
 
     subgraph Core["Core Engine"]
-        ORCH["Orchestrator<br/>core/orchestrator.py"]
-        SCHED["Scheduler<br/>core/scheduler.py"]
-        PIPE["IngestPipeline<br/>core/pipeline.py"]
-        REG["PluginRegistry<br/>core/registry.py"]
+        ORCH["Orchestrator<br/><i>core/orchestrator.py</i>"]
+        SCHED["Scheduler<br/><i>core/scheduler.py</i>"]
+        PIPE["IngestPipeline<br/><i>core/pipeline.py</i>"]
+        REG["PluginRegistry<br/><i>core/registry.py</i>"]
     end
 
     subgraph Ingress["Ingress Layer"]
-        WATCH["FileWatcher<br/>ingress/watcher.py"]
-        GATE["ScopeGate<br/>ingress/scope_gate.py"]
-        IDENT["FileIdentityResolver<br/>ingress/identity.py"]
+        WATCH["FileWatcher<br/><i>ingress/watcher.py</i>"]
+        GATE["ScopeGate<br/><i>ingress/scope_gate.py</i>"]
+        IDENT["FileIdentityResolver<br/><i>ingress/identity.py</i>"]
     end
 
     subgraph Parsers["Parser Plugins"]
@@ -42,28 +42,28 @@ flowchart LR
     end
 
     subgraph Chunking["Chunking Engine"]
-        CDC["CDC Chunker<br/>chunking/cdc.py"]
-        DEDUP["ChunkDeduplicator<br/>chunking/dedup.py"]
-        FP["Fingerprinter<br/>chunking/fingerprint.py"]
+        CDC["CDC Chunker<br/><i>chunking/cdc.py</i>"]
+        DEDUP["ChunkDeduplicator<br/><i>chunking/dedup.py</i>"]
+        FP["Fingerprinter<br/><i>chunking/fingerprint.py</i>"]
     end
 
     subgraph Vault["Dual Storage Vault"]
-        SQLITE["SQLiteEngine<br/>vault/sqlite_engine.py"]
-        LANCE["LanceEngine<br/>vault/lance_engine.py"]
-        SUBS["SubscriptionManager<br/>vault/subscriptions.py"]
-        REFS["RefCounter<br/>vault/ref_counting.py"]
-        SCHEMA["Schema DDL<br/>vault/schema.py"]
+        SQLITE["SQLiteEngine<br/><i>vault/sqlite_engine.py</i>"]
+        LANCE["LanceEngine<br/><i>vault/lance_engine.py</i>"]
+        SUBS["SubscriptionManager<br/><i>vault/subscriptions.py</i>"]
+        REFS["RefCounter<br/><i>vault/ref_counting.py</i>"]
+        SCHEMA["Schema DDL<br/><i>vault/schema.py</i>"]
     end
 
     subgraph Handoff["Router Handoff"]
-        BPQ["BackpressureQueue<br/>backpressure_queue.py"]
-        GWC["GatewayClient<br/>gateway_client.py"]
+        BPQ["BackpressureQueue<br/><i>backpressure_queue.py</i>"]
+        GWC["GatewayClient<br/><i>gateway_client.py</i>"]
     end
 
     subgraph Janitor["Maintenance"]
-        TOMB["TombstoneCascade<br/>janitor/tombstone.py"]
-        SYNC["JournalSync<br/>janitor/sync.py"]
-        REIDX["ReindexManager<br/>janitor/reindex.py"]
+        TOMB["TombstoneCascade<br/><i>janitor/tombstone.py</i>"]
+        SYNC["JournalSync<br/><i>janitor/sync.py</i>"]
+        REIDX["ReindexManager<br/><i>janitor/reindex.py</i>"]
     end
 
     %% External connections
@@ -72,10 +72,7 @@ flowchart LR
     GWC <-->|embeddings/OCR| ROUTER
 
     %% Gateway flow
-    APP --> MW_CTX
-    MW_CTX --> MW_AUTH
-    MW_AUTH --> MW_CORS
-    MW_CORS --> ROUTES
+    APP --> MW_CTX --> MW_AUTH --> MW_CORS --> ROUTES
     APP --> ERR
     ROUTES --> ORCH
 
@@ -434,7 +431,7 @@ sequenceDiagram
 
 ## File Tree
 
-```text
+```
 LocalBrain/
 ├── pyproject.toml              # Project config (UV, pytest)
 ├── Dockerfile                  # Multi-stage build
