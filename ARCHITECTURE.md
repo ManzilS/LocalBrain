@@ -11,25 +11,25 @@ graph TB
     end
 
     subgraph Gateway["Gateway Layer"]
-        APP["FastAPI App<br/><i>gateway/main.py</i>"]
+        APP["FastAPI App<br/>gateway/main.py"]
         MW_CTX["RequestContext<br/>Middleware"]
         MW_AUTH["Auth<br/>Middleware"]
         MW_CORS["CORS<br/>Middleware"]
-        ROUTES["API Routes<br/><i>gateway/server.py</i>"]
-        ERR["Error Handler<br/><i>utils/errors.py</i>"]
+        ROUTES["API Routes<br/>gateway/server.py"]
+        ERR["Error Handler<br/>utils/errors.py"]
     end
 
     subgraph Core["Core Engine"]
-        ORCH["Orchestrator<br/><i>core/orchestrator.py</i>"]
-        SCHED["Scheduler<br/><i>core/scheduler.py</i>"]
-        PIPE["IngestPipeline<br/><i>core/pipeline.py</i>"]
-        REG["PluginRegistry<br/><i>core/registry.py</i>"]
+        ORCH["Orchestrator<br/>core/orchestrator.py"]
+        SCHED["Scheduler<br/>core/scheduler.py"]
+        PIPE["IngestPipeline<br/>core/pipeline.py"]
+        REG["PluginRegistry<br/>core/registry.py"]
     end
 
     subgraph Ingress["Ingress Layer"]
-        WATCH["FileWatcher<br/><i>ingress/watcher.py</i>"]
-        GATE["ScopeGate<br/><i>ingress/scope_gate.py</i>"]
-        IDENT["FileIdentityResolver<br/><i>ingress/identity.py</i>"]
+        WATCH["FileWatcher<br/>ingress/watcher.py"]
+        GATE["ScopeGate<br/>ingress/scope_gate.py"]
+        IDENT["FileIdentityResolver<br/>ingress/identity.py"]
     end
 
     subgraph Parsers["Parser Plugins"]
@@ -42,28 +42,28 @@ graph TB
     end
 
     subgraph Chunking["Chunking Engine"]
-        CDC["CDC Chunker<br/><i>chunking/cdc.py</i>"]
-        DEDUP["ChunkDeduplicator<br/><i>chunking/dedup.py</i>"]
-        FP["Fingerprinter<br/><i>chunking/fingerprint.py</i>"]
+        CDC["CDC Chunker<br/>chunking/cdc.py"]
+        DEDUP["ChunkDeduplicator<br/>chunking/dedup.py"]
+        FP["Fingerprinter<br/>chunking/fingerprint.py"]
     end
 
     subgraph Vault["Dual Storage Vault"]
-        SQLITE["SQLiteEngine<br/><i>vault/sqlite_engine.py</i>"]
-        LANCE["LanceEngine<br/><i>vault/lance_engine.py</i>"]
-        SUBS["SubscriptionManager<br/><i>vault/subscriptions.py</i>"]
-        REFS["RefCounter<br/><i>vault/ref_counting.py</i>"]
-        SCHEMA["Schema DDL<br/><i>vault/schema.py</i>"]
+        SQLITE["SQLiteEngine<br/>vault/sqlite_engine.py"]
+        LANCE["LanceEngine<br/>vault/lance_engine.py"]
+        SUBS["SubscriptionManager<br/>vault/subscriptions.py"]
+        REFS["RefCounter<br/>vault/ref_counting.py"]
+        SCHEMA["Schema DDL<br/>vault/schema.py"]
     end
 
     subgraph Handoff["Router Handoff"]
-        BPQ["BackpressureQueue<br/><i>backpressure_queue.py</i>"]
-        GWC["GatewayClient<br/><i>gateway_client.py</i>"]
+        BPQ["BackpressureQueue<br/>backpressure_queue.py"]
+        GWC["GatewayClient<br/>gateway_client.py"]
     end
 
     subgraph Janitor["Maintenance"]
-        TOMB["TombstoneCascade<br/><i>janitor/tombstone.py</i>"]
-        SYNC["JournalSync<br/><i>janitor/sync.py</i>"]
-        REIDX["ReindexManager<br/><i>janitor/reindex.py</i>"]
+        TOMB["TombstoneCascade<br/>janitor/tombstone.py"]
+        SYNC["JournalSync<br/>janitor/sync.py"]
+        REIDX["ReindexManager<br/>janitor/reindex.py"]
     end
 
     %% External connections
@@ -178,13 +178,13 @@ flowchart TD
     subgraph P3["Phase 3: CHUNK"]
         P3A["cdc_chunk() — Gear-hash + boundary snapping"]
         P3B["chunk_fingerprint() per chunk"]
-        P3C{"Deduplicator:<br/>is_duplicate?"}
+        P3C{"Deduplicator: is_duplicate?"}
         P3D["Skip duplicate chunk"]
         P3E["Create Chunk objects"]
     end
 
     subgraph P4["Phase 4: HANDOFF"]
-        P4A{"BackpressureQueue<br/>is_full?"}
+        P4A{"BackpressureQueue is_full?"}
         P4B["Enqueue HandoffRequest"]
         P4C["Log backpressure warning"]
     end
@@ -431,7 +431,7 @@ sequenceDiagram
 
 ## File Tree
 
-```
+```text
 LocalBrain/
 ├── pyproject.toml              # Project config (UV, pytest)
 ├── Dockerfile                  # Multi-stage build
