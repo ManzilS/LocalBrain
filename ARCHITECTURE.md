@@ -2,8 +2,10 @@
 
 ## System Overview
 
+## System Overview
+
 ```mermaid
-graph TB
+flowchart LR
     subgraph External["External Systems"]
         FS["File System<br/>(OS Events)"]
         ROUTER["Router App<br/>(AI Gateway)"]
@@ -40,6 +42,115 @@ graph TB
         AUD["AudioParser"]
         ARC["ArchiveParser"]
     end
+
+    subgraph Chunking["Chunking Engine"]
+        CDC["CDC Chunker<br/>chunking/cdc.py"]
+        DEDUP["ChunkDeduplicator<br/>chunking/dedup.py"]
+        FP["Fingerprinter<br/>chunking/fingerprint.py"]
+    end
+
+    subgraph Vault["Dual Storage Vault"]
+        SQLITE["SQLiteEngine<br/>vault/sqlite_engine.py"]
+        LANCE["LanceEngine<br/>vault/lance_engine.py"]
+        SUBS["SubscriptionManager<br/>vault/subscriptions.py"]
+        REFS["RefCounter<br/>vault/ref_counting.py"]
+        SCHEMA["Schema DDL<br/>vault/schema.py"]
+    end
+
+    subgraph Handoff["Router Handoff"]
+        BPQ["BackpressureQueue<br/>backpressure_queue.py"]
+        GWC["GatewayClient<br/>gateway_client.py"]
+    end
+
+    subgraph Janitor["Maintenance"]
+        TOMB["TombstoneCascade<br/>janitor/tombstone.py"]
+        SYNC["JournalSync<br/>janitor/sync.py"]
+        REIDX["ReindexManager<br/>janitor/reindex.py"]
+    end
+
+    %% External connections
+    FS -->|OS events| WATCH
+    CLIENT -->|HTTP| APP
+    GWC <-->|embeddings/OCR| ROUTER
+
+    %% Gateway flow
+    APP --> MW_CTX
+    MW_CTX --> MW_AUTH
+    MW_AUTH --> MW_CORS
+    MW_CORS --> ROUTES
+    APP --> ERR
+    ROUTES --> ORCH
+
+    %% Core flow
+    ORCH --> WATCH
+    ORCH --> SCHED
+    ORCH --> PIPE
+    ORCH --> TOMB
+    ORCH --> SYNC
+    ORCH --> REIDX
+    SCHED --> PIPE
+
+    %% Ingress
+    WATCH --> GATE
+    WATCH --> IDENT
+    PIPE --> GATE
+    PIPE --> IDENT
+
+    %% Parsing
+    PIPE --> REG
+    REG --> TXT
+    REG --> PDF
+    REG --> OFF
+    REG --> IMG
+    REG --> AUD
+    REG --> ARC
+
+    %% Chunking
+    PIPE --> CDC
+    PIPE --> DEDUP
+    PIPE --> FP
+    CDC --> FP
+
+    %% Storage
+    PIPE --> SQLITE
+    PIPE --> SUBS
+    PIPE --> REFS
+    SQLITE --> SCHEMA
+    LANCE --> LANCE
+
+    %% Handoff
+    PIPE --> BPQ
+    BPQ --> GWC
+
+    %% Janitor
+    TOMB --> SQLITE
+    TOMB --> LANCE
+    TOMB --> SUBS
+    TOMB --> REFS
+    SYNC --> SQLITE
+    REIDX --> SQLITE
+    REIDX --> SUBS
+
+    %% Styling (Added color:#000 for dark mode text contrast)
+    classDef external fill:#f9f,stroke:#333,stroke-width:2px,color:#000
+    classDef gateway fill:#bbf,stroke:#333,stroke-width:1px,color:#000
+    classDef core fill:#fbb,stroke:#333,stroke-width:1px,color:#000
+    classDef ingress fill:#bfb,stroke:#333,stroke-width:1px,color:#000
+    classDef parser fill:#ffd,stroke:#333,stroke-width:1px,color:#000
+    classDef chunk fill:#dff,stroke:#333,stroke-width:1px,color:#000
+    classDef vault fill:#fdb,stroke:#333,stroke-width:1px,color:#000
+    classDef handoff fill:#dbf,stroke:#333,stroke-width:1px,color:#000
+    classDef janitor fill:#ddd,stroke:#333,stroke-width:1px,color:#000
+
+    class FS,ROUTER,CLIENT external
+    class APP,MW_CTX,MW_AUTH,MW_CORS,ROUTES,ERR gateway
+    class ORCH,SCHED,PIPE,REG core
+    class WATCH,GATE,IDENT ingress
+    class TXT,PDF,OFF,IMG,AUD,ARC parser
+    class CDC,DEDUP,FP chunk
+    class SQLITE,LANCE,SUBS,REFS,SCHEMA vault
+    class BPQ,GWC handoff
+    class TOMB,SYNC,REIDX janitor
 
     subgraph Chunking["Chunking Engine"]
         CDC["CDC Chunker<br/>chunking/cdc.py"]
