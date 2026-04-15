@@ -286,6 +286,11 @@ class IngestPipeline:
                 await self._engine.upsert_chunk_no_commit(chunk)
                 chunk_ids.append(chunk.id)
 
+            # Persist file record BEFORE subscribing — file_chunks.file_id
+            # has a FOREIGN KEY into files(id), so the row must exist first.
+            state.file_record.status = FileStatus.indexed
+            await self._engine.upsert_file_no_commit(state.file_record)
+
             # Subscribe file to chunks
             await self._subs.subscribe_no_commit(state.file_record.id, chunk_ids)
 
@@ -294,10 +299,6 @@ class IngestPipeline:
                 await db.execute(
                     "UPDATE chunks SET ref_count = ref_count + 1 WHERE id = ?", (cid,)
                 )
-
-            # Persist file record
-            state.file_record.status = FileStatus.indexed
-            await self._engine.upsert_file_no_commit(state.file_record)
 
             # Journal entry
             import json

@@ -4,12 +4,94 @@ High-performance local file ingestion engine — watches, parses, chunks, and st
 
 ## Quick Start
 
+### Prerequisites
+
+- **Python 3.12 or newer** — check with `python --version`.
+- **[uv](https://github.com/astral-sh/uv)** — the project's package/runtime manager.
+  - Install on macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+  - Install on Windows (PowerShell): `irm https://astral.sh/uv/install.ps1 | iex`
+
+### Install & Run
+
+From the repo root:
+
 ```bash
+# 1. Install dependencies and build the `localbrain` entry point
 uv sync
+
+# 2. Start the server
 uv run localbrain
 ```
 
-The server starts on `http://127.0.0.1:8090` by default.
+On first run you should see log lines ending with:
+
+```
+LocalBrain ready on 127.0.0.1:8090
+Application startup complete.
+```
+
+The server listens on `http://127.0.0.1:8090`. Leave it running and open a
+second terminal to interact with it.
+
+### Verify It's Working
+
+```bash
+curl http://127.0.0.1:8090/health
+```
+
+Expected response (abbreviated):
+
+```json
+{
+  "status": "healthy",
+  "watch_roots": ["~/Documents", "~/Projects"],
+  "queue_depths": {"fast": 0, "heavy": 0, "background": 0},
+  "parsers": ["text", "pdf", "archive", "chatgpt", "claude", "gemini", "ai_generic"]
+}
+```
+
+### Try an Ingestion
+
+LocalBrain watches the directories listed in `access.config.json` (by default
+`~/Documents` and `~/Projects`). Drop a text file into one of them:
+
+```bash
+# macOS/Linux
+echo "hello from localbrain" > ~/Documents/localbrain_hello.txt
+
+# Windows (Git Bash / WSL)
+echo "hello from localbrain" > "$HOME/Documents/localbrain_hello.txt"
+```
+
+Wait a few seconds (debounce + settle), then list tracked files:
+
+```bash
+curl http://127.0.0.1:8090/v1/files
+```
+
+You should see your file with `"status": "indexed"`.
+
+### Stopping the Server
+
+Press `Ctrl+C` in the terminal running `uv run localbrain`.
+
+### Troubleshooting
+
+- **`error: Failed to spawn: 'localbrain'` / `program not found`** — you have
+  an older checkout that lacked the `[build-system]` block in `pyproject.toml`.
+  Run `git pull && uv sync` to rebuild the entry point.
+- **`Table 'chunks' already exists` on startup** — a previous process was
+  killed mid-init and left an orphan LanceDB table. Recent versions recover
+  automatically; if you see it on an older checkout, delete
+  `~/.localbrain/lance/chunks.lance` and restart.
+- **Nothing appears in `/v1/files` after dropping a file** — the watcher only
+  sees *new* events after the server starts. Modify the file (e.g. append a
+  line) to trigger an event, and confirm the file's directory is listed under
+  `watch_roots` in `/health`.
+- **Port 8090 is in use** — set `LOCALBRAIN_PORT=8091 uv run localbrain` (or
+  any free port).
+- **Want to watch a different directory?** — edit `access.config.json` and
+  restart the server.
 
 ## Architecture
 

@@ -80,7 +80,24 @@ class LanceEngine:
                         )
                         break
         else:
-            self._table = self._db.create_table(_TABLE_NAME, schema=_make_schema(self._dim))
+            try:
+                self._table = self._db.create_table(
+                    _TABLE_NAME, schema=_make_schema(self._dim)
+                )
+            except (ValueError, OSError) as exc:
+                # A prior process may have crashed mid-init leaving an orphan
+                # table directory that list_tables() does not surface. Recover
+                # by dropping and re-creating.
+                if "already exists" not in str(exc):
+                    raise
+                logger.warning(
+                    "Orphan LanceDB table '%s' detected; dropping and recreating.",
+                    _TABLE_NAME,
+                )
+                self._db.drop_table(_TABLE_NAME, ignore_missing=True)
+                self._table = self._db.create_table(
+                    _TABLE_NAME, schema=_make_schema(self._dim)
+                )
 
         logger.info("LanceDB opened: %s (dim=%d)", self._path, self._dim)
 
