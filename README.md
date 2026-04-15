@@ -53,23 +53,46 @@ Expected response (abbreviated):
 ### Try an Ingestion
 
 LocalBrain watches the directories listed in `access.config.json` (by default
-`~/Documents` and `~/Projects`). Drop a text file into one of them:
+`~/Documents` and `~/Projects`).
+
+**Two ways files get ingested:**
+
+1. **Initial scan at startup** — every file already present under each watch
+   root is enqueued for ingestion when the server boots. Look for these log
+   lines:
+
+   ```
+   Initial scan of N roots: [...]
+   Initial scan complete — emitted M event(s)
+   Watching N roots: [...]
+   ```
+
+2. **Live watching** — any file added or modified after startup triggers an
+   `Event: created|modified <path>` log line and is ingested automatically.
+
+To see it work, drop a text file into a watched directory:
 
 ```bash
 # macOS/Linux
-echo "hello from localbrain" > ~/Documents/localbrain_hello.txt
+echo "hello from localbrain" > ~/Projects/localbrain_hello.txt
 
 # Windows (Git Bash / WSL)
-echo "hello from localbrain" > "$HOME/Documents/localbrain_hello.txt"
+echo "hello from localbrain" > "$HOME/Projects/localbrain_hello.txt"
 ```
 
-Wait a few seconds (debounce + settle), then list tracked files:
+Wait ~5–10 seconds (the file is debounced, settled to detect active writes,
+then chunked/stored), then list tracked files:
 
 ```bash
 curl http://127.0.0.1:8090/v1/files
 ```
 
 You should see your file with `"status": "indexed"`.
+
+> **Heads-up about large watch roots.** The initial scan is recursive. If
+> your `~/Documents` contains thousands of files, they'll *all* get queued at
+> startup. Narrow `watch_roots` in `access.config.json` to only the
+> directories you actually want indexed, or add more `exclude_patterns`.
 
 ### Stopping the Server
 
@@ -84,10 +107,14 @@ Press `Ctrl+C` in the terminal running `uv run localbrain`.
   killed mid-init and left an orphan LanceDB table. Recent versions recover
   automatically; if you see it on an older checkout, delete
   `~/.localbrain/lance/chunks.lance` and restart.
-- **Nothing appears in `/v1/files` after dropping a file** — the watcher only
-  sees *new* events after the server starts. Modify the file (e.g. append a
-  line) to trigger an event, and confirm the file's directory is listed under
-  `watch_roots` in `/health`.
+- **Nothing appears in `/v1/files` after dropping a file** — first confirm
+  the file's directory is listed under `watch_roots` in `/health`. If it is,
+  wait 5–10 seconds (debounce + settle + pipeline). You should see an
+  `Event: created <path>` log line. If no event appears, the path is being
+  rejected by `access.config.json` — check `blocked_extensions` and
+  `exclude_patterns`. On older checkouts (before the initial-scan fix), files
+  that existed before the server started were ignored entirely; `git pull` to
+  get the fix.
 - **Port 8090 is in use** — set `LOCALBRAIN_PORT=8091 uv run localbrain` (or
   any free port).
 - **Want to watch a different directory?** — edit `access.config.json` and

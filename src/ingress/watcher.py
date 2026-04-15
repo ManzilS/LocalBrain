@@ -53,13 +53,39 @@ class FileWatcher:
     # ── Public API ──────────────────────────────────────
 
     async def watch(self) -> AsyncIterator[IngestEvent]:
-        """Yield debounced, scope-gated ``IngestEvent`` objects."""
+        """Yield debounced, scope-gated ``IngestEvent`` objects.
+
+        First performs an initial scan of every watch root so that files
+        already present on disk at startup are ingested. Then switches to
+        OS-level change notifications for anything that arrives afterwards.
+        """
         existing_roots = [r for r in self._roots if r.exists()]
+        missing_roots = [r for r in self._roots if not r.exists()]
+        if missing_roots:
+            logger.warning(
+                "Skipping %d watch root(s) that do not exist: %s",
+                len(missing_roots),
+                [str(r) for r in missing_roots],
+            )
         if not existing_roots:
             logger.warning("No valid watch roots found — watcher idle")
             return
 
         str_roots = [str(r) for r in existing_roots]
+
+        # ── Initial scan: pick up files already on disk ─────
+        logger.info("Initial scan of %d roots: %s", len(str_roots), str_roots)
+        scanned = 0
+        for root in existing_roots:
+            async for event in self._scan_root(root):
+                scanned += 1
+                yield event
+                # Cooperative yield every batch so we don't starve the loop
+                if scanned % 50 == 0:
+                    await asyncio.sleep(0)
+        logger.info("Initial scan complete — emitted %d event(s)", scanned)
+
+        # ── Live watch ─────────────────────────────────────
         logger.info("Watching %d roots: %s", len(str_roots), str_roots)
 
         async for changes in awatch(
@@ -68,6 +94,7 @@ class FileWatcher:
             stop_event=self._stop,
             recursive=True,
         ):
+            logger.debug("Watcher received %d raw change(s)", len(changes))
             for change_type, path_str in changes:
                 path = Path(path_str)
 
@@ -94,10 +121,47 @@ class FileWatcher:
 
                     identity = FileIdentity(path=str(path))
 
+                logger.info("Event: %s %s", event_type.value, path)
                 yield IngestEvent(
                     event_type=event_type,
                     file_identity=identity,
                 )
+
+    # ── Initial scan ────────────────────────────────────
+
+    async def _scan_root(self, root: Path) -> AsyncIterator[IngestEvent]:
+        """Emit a ``created`` event for every scope-allowed file under *root*.
+
+        Uses :meth:`pathlib.Path.rglob` and applies the scope gate to each
+        candidate. Files already tracked in the vault will be no-ops in the
+        pipeline because their identity is unchanged.
+        """
+        try:
+            iterator = root.rglob("*")
+        except OSError as exc:
+            logger.warning("Could not scan %s: %s", root, exc)
+            return
+
+        for path in iterator:
+            # Cheap bail-outs first — avoid a stat() for every dir entry
+            try:
+                if not path.is_file():
+                    continue
+            except OSError:
+                continue
+
+            if not self._gate.is_allowed(path):
+                continue
+
+            try:
+                identity = self._resolver.resolve(path)
+            except OSError:
+                continue
+
+            yield IngestEvent(
+                event_type=EventType.created,
+                file_identity=identity,
+            )
 
     def stop(self) -> None:
         """Signal the watcher to shut down gracefully."""
