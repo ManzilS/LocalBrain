@@ -12,6 +12,7 @@ import os
 import time
 
 from src.core.models import EventType, FileIdentity, IngestEvent
+from src.ingress.identity import _fold_int64
 from src.vault.sqlite_engine import SQLiteEngine
 
 logger = logging.getLogger(__name__)
@@ -58,8 +59,8 @@ class JournalSync:
                         event_type=EventType.modified,
                         file_identity=FileIdentity(
                             path=path,
-                            inode=stat.st_ino,
-                            device=stat.st_dev,
+                            inode=_fold_int64(stat.st_ino),
+                            device=_fold_int64(stat.st_dev),
                             mtime=stat.st_mtime,
                             size=stat.st_size,
                             head_hash="",  # Stale — will be recomputed on re-ingestion

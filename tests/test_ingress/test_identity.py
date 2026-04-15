@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from src.core.models import FileIdentity
-from src.ingress.identity import FileIdentityResolver
+from src.ingress.identity import FileIdentityResolver, _fold_int64
 
 
 @pytest.fixture
@@ -81,3 +81,24 @@ def test_same_physical_file_zero_inode(resolver):
     a = FileIdentity(path="/a.txt", inode=0, device=1)
     b = FileIdentity(path="/b.txt", inode=0, device=1)
     assert not resolver.same_physical_file(a, b)
+
+
+def test_fold_int64_in_range_unchanged():
+    assert _fold_int64(0) == 0
+    assert _fold_int64(12345) == 12345
+    assert _fold_int64(-12345) == -12345
+    assert _fold_int64((1 << 63) - 1) == (1 << 63) - 1
+
+
+def test_fold_int64_overflow_collapses_to_signed_range():
+    # Windows 128-bit FILE_ID_INFO values can exceed int64; folding must
+    # produce a value SQLite's signed INTEGER can store.
+    huge = (1 << 120) | 42
+    folded = _fold_int64(huge)
+    assert -(1 << 63) <= folded <= (1 << 63) - 1
+
+
+def test_fold_int64_deterministic():
+    # Equality comparisons must still work after folding.
+    huge = (0xDEADBEEFCAFEBABE << 64) | 0x0123456789ABCDEF
+    assert _fold_int64(huge) == _fold_int64(huge)
