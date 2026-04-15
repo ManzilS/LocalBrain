@@ -44,7 +44,7 @@ Expected response (abbreviated):
 ```json
 {
   "status": "healthy",
-  "watch_roots": ["~/Documents", "~/Projects"],
+  "watch_roots": ["~/Documents/Projects"],
   "queue_depths": {"fast": 0, "heavy": 0, "background": 0},
   "parsers": ["text", "pdf", "archive", "chatgpt", "claude", "gemini", "ai_generic"]
 }
@@ -53,7 +53,8 @@ Expected response (abbreviated):
 ### Try an Ingestion
 
 LocalBrain watches the directories listed in `access.config.json` (by default
-`~/Documents` and `~/Projects`).
+just `~/Documents/Projects`). Create that folder if it doesn't exist, or edit
+`access.config.json` to point at a directory you actually use.
 
 **Two ways files get ingested:**
 
@@ -74,10 +75,12 @@ To see it work, drop a text file into a watched directory:
 
 ```bash
 # macOS/Linux
-echo "hello from localbrain" > ~/Projects/localbrain_hello.txt
+mkdir -p ~/Documents/Projects
+echo "hello from localbrain" > ~/Documents/Projects/localbrain_hello.txt
 
 # Windows (Git Bash / WSL)
-echo "hello from localbrain" > "$HOME/Projects/localbrain_hello.txt"
+mkdir -p "$HOME/Documents/Projects"
+echo "hello from localbrain" > "$HOME/Documents/Projects/localbrain_hello.txt"
 ```
 
 Wait ~5–10 seconds (the file is debounced, settled to detect active writes,
@@ -89,10 +92,10 @@ curl http://127.0.0.1:8090/v1/files
 
 You should see your file with `"status": "indexed"`.
 
-> **Heads-up about large watch roots.** The initial scan is recursive. If
-> your `~/Documents` contains thousands of files, they'll *all* get queued at
-> startup. Narrow `watch_roots` in `access.config.json` to only the
-> directories you actually want indexed, or add more `exclude_patterns`.
+> **Heads-up about large watch roots.** The initial scan is recursive, so
+> every file under each watch root gets queued at startup. Keep
+> `watch_roots` narrow (the default `~/Documents/Projects` is intentionally
+> scoped) and add `exclude_patterns` for anything you don't want indexed.
 
 ### Stopping the Server
 
@@ -179,7 +182,7 @@ Controls which directories and files the brain can access:
 
 ```json
 {
-  "watch_roots": ["~/Documents", "~/Projects"],
+  "watch_roots": ["~/Documents/Projects"],
   "exclude_patterns": ["**/node_modules/**", "**/.git/**"],
   "blocked_extensions": [".pem", ".key", ".wallet", ".env"],
   "max_file_size_bytes": 104857600

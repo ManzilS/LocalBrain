@@ -1,7 +1,6 @@
 {
   "watch_roots": [
-    "~/Documents",
-    "~/Projects"
+    "~/Documents/Projects"
   ],
   "include_patterns": [],
   "exclude_patterns": [
