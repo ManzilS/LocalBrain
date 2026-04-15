@@ -155,15 +155,35 @@ async def search(
     request: Request,
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=100),
+    mode: str = Query("keyword", pattern="^(keyword|semantic)$"),
 ) -> dict[str, Any]:
-    """Semantic search placeholder — requires embeddings from Router."""
-    # In production this would encode the query via Router, then search LanceDB.
-    # For now, fall back to a simple text match via SQLite.
+    """Search ingested chunks.
+
+    ``mode=keyword`` (default) runs an FTS5 full-text search entirely
+    inside LocalBrain — no Router required. ``mode=semantic`` is reserved
+    for embedding-based search via the Router app and returns an empty
+    result set with a note until that handoff is implemented here.
+    """
     orch = request.app.state.orchestrator
+
+    if mode == "semantic":
+        return {
+            "query": q,
+            "mode": "semantic",
+            "results": [],
+            "count": 0,
+            "note": (
+                "Semantic search requires Router handoff for query embedding. "
+                "Use mode=keyword for local full-text search."
+            ),
+        }
+
+    results = await orch.engine.search_chunks(q, limit=limit)
     return {
         "query": q,
-        "results": [],
-        "note": "Semantic search requires Router handoff for query embedding",
+        "mode": "keyword",
+        "results": results,
+        "count": len(results),
     }
 
 

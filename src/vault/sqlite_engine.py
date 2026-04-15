@@ -26,6 +26,25 @@ from src.vault.schema import ensure_schema
 
 logger = logging.getLogger(__name__)
 
+# FTS5 meta characters that could produce syntax errors when a user's
+# raw keyword query is passed through unescaped.
+_FTS5_META = set('"():*+-^~')
+
+
+def _sanitize_fts_query(raw: str) -> str:
+    """Turn a free-form keyword query into a safe FTS5 MATCH expression.
+
+    Splits on whitespace, strips FTS5 meta characters, quotes each term
+    as an exact token, and ANDs them together. An empty or all-meta
+    input returns an empty string (caller should skip the query).
+    """
+    terms: list[str] = []
+    for raw_term in raw.split():
+        cleaned = "".join(ch for ch in raw_term if ch not in _FTS5_META).strip()
+        if cleaned:
+            terms.append(f'"{cleaned}"')
+    return " AND ".join(terms)
+
 
 class SQLiteEngine:
     """Async SQLite connection wrapper for the LocalBrain vault."""
@@ -194,6 +213,56 @@ class SQLiteEngine:
         async with self.db.execute("SELECT fingerprint FROM chunks") as cur:
             rows = await cur.fetchall()
             return [r["fingerprint"] for r in rows]
+
+    # ── Full-text search ────────────────────────────────
+
+    async def search_chunks(self, query: str, *, limit: int = 10) -> list[dict]:
+        """Local keyword search over chunk content using SQLite FTS5.
+
+        Returns a list of ``{chunk_id, file_id, path, snippet, score,
+        content}`` dicts ordered by BM25 relevance (best first). Works
+        without the Router app — keyword search only, no embeddings.
+        """
+        fts_query = _sanitize_fts_query(query)
+        if not fts_query:
+            return []
+
+        try:
+            async with self.db.execute(
+                """
+                SELECT c.id                                               AS chunk_id,
+                       c.content                                          AS content,
+                       fc.file_id                                         AS file_id,
+                       f.path                                             AS path,
+                       snippet(chunks_fts, 0, '[', ']', '…', 20)          AS snippet,
+                       bm25(chunks_fts)                                   AS score
+                FROM chunks_fts
+                JOIN chunks       c  ON c.rowid = chunks_fts.rowid
+                LEFT JOIN file_chunks fc ON fc.chunk_id = c.id
+                LEFT JOIN files   f  ON f.id = fc.file_id
+                WHERE chunks_fts MATCH ?
+                ORDER BY score
+                LIMIT ?
+                """,
+                (fts_query, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        except aiosqlite.OperationalError as exc:
+            # Malformed FTS expression after sanitising — return empty.
+            logger.warning("FTS query rejected by SQLite: %r (%s)", fts_query, exc)
+            return []
+
+        return [
+            {
+                "chunk_id": r["chunk_id"],
+                "file_id": r["file_id"],
+                "path": r["path"],
+                "snippet": r["snippet"],
+                "score": r["score"],
+                "content": r["content"],
+            }
+            for r in rows
+        ]
 
     # ── Queue ───────────────────────────────────────────
 

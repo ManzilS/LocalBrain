@@ -322,6 +322,39 @@ All AI parsers produce a common metadata schema:
 }
 ```
 
+## Searching the vault
+
+LocalBrain ships with a local full-text index (SQLite FTS5, BM25 ranked)
+so you can search ingested chunks without running the Router app:
+
+```bash
+curl "http://localhost:8090/v1/search?q=asyncio&limit=5"
+```
+
+Response:
+
+```json
+{
+  "query": "asyncio",
+  "mode": "keyword",
+  "count": 1,
+  "results": [
+    {
+      "chunk_id": "…",
+      "file_id": "…",
+      "path": "/home/me/Documents/Projects/notes.md",
+      "snippet": "python [asyncio] makes network servers simple",
+      "score": -1.73,
+      "content": "python asyncio makes network servers simple"
+    }
+  ]
+}
+```
+
+Multi-term queries are ANDed (`q=quick+fox` matches chunks containing
+both words). `mode=semantic` is reserved for embedding search via the
+Router app and currently returns an empty result set with a note.
+
 ## API Endpoints
 
 | Method | Path                  | Description                          |
@@ -331,7 +364,7 @@ All AI parsers produce a common metadata schema:
 | POST   | `/v1/ingest`          | Manually trigger file ingestion      |
 | GET    | `/v1/files`           | List tracked files                   |
 | GET    | `/v1/files/{id}`      | File detail with chunks              |
-| GET    | `/v1/search?q=...`    | Semantic search (requires Router)    |
+| GET    | `/v1/search?q=...`    | Keyword (FTS5) or semantic search    |
 | GET    | `/v1/queue`           | Queue depths by lane                 |
 | POST   | `/v1/janitor/sync`    | Trigger journal sync                 |
 | POST   | `/v1/janitor/purge`   | Trigger tombstone purge              |

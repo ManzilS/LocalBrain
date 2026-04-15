@@ -6,7 +6,11 @@ designed for crash safety — every write path uses transactions.
 
 from __future__ import annotations
 
+import logging
+
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 # ── DDL statements ──────────────────────────────────────
 
@@ -88,6 +92,36 @@ _INDICES = [
     "CREATE INDEX IF NOT EXISTS idx_journal_ts        ON journal(timestamp);",
 ]
 
+# ── Full-text search over chunk content ─────────────────
+#
+# Uses FTS5 in "external content" mode so the FTS index shares storage
+# with the chunks table via rowid. Triggers keep the index synchronised
+# on INSERT / UPDATE / DELETE of the chunks table.
+
+_CREATE_CHUNKS_FTS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    content,
+    content='chunks',
+    content_rowid='rowid',
+    tokenize='porter unicode61'
+);
+"""
+
+_FTS_TRIGGERS = [
+    """CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+         INSERT INTO chunks_fts(rowid, content) VALUES (new.rowid, new.content);
+       END;""",
+    """CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+         INSERT INTO chunks_fts(chunks_fts, rowid, content)
+         VALUES ('delete', old.rowid, old.content);
+       END;""",
+    """CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+         INSERT INTO chunks_fts(chunks_fts, rowid, content)
+         VALUES ('delete', old.rowid, old.content);
+         INSERT INTO chunks_fts(rowid, content) VALUES (new.rowid, new.content);
+       END;""",
+]
+
 _ALL_DDL = [_CREATE_FILES, _CREATE_CHUNKS, _CREATE_FILE_CHUNKS, _CREATE_QUEUE, _CREATE_JOURNAL]
 
 
@@ -95,7 +129,7 @@ _ALL_DDL = [_CREATE_FILES, _CREATE_CHUNKS, _CREATE_FILE_CHUNKS, _CREATE_QUEUE, _
 
 
 async def ensure_schema(db: aiosqlite.Connection) -> None:
-    """Create all tables and indices if they do not exist."""
+    """Create all tables, indices, and FTS structures if they do not exist."""
     await db.execute("PRAGMA journal_mode=WAL;")
     await db.execute("PRAGMA foreign_keys=ON;")
 
@@ -104,7 +138,47 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
     for idx in _INDICES:
         await db.execute(idx)
 
+    # FTS virtual table + triggers must be created AFTER the `chunks`
+    # table because they reference it.
+    await db.execute(_CREATE_CHUNKS_FTS)
+    for trig in _FTS_TRIGGERS:
+        await db.execute(trig)
+
+    await _backfill_chunks_fts(db)
+
     await db.commit()
+
+
+async def _backfill_chunks_fts(db: aiosqlite.Connection) -> None:
+    """Populate the FTS index if upgrading an existing vault.
+
+    When a vault created by an older build is opened for the first time
+    with this schema, ``chunks`` may already have rows but ``chunks_fts``
+    will be empty. The triggers only fire on future writes, so copy
+    existing content over once.
+    """
+    async with db.execute("SELECT COUNT(*) FROM chunks") as cur:
+        chunks_count = (await cur.fetchone())[0]
+    if chunks_count == 0:
+        return
+
+    # External-content FTS5: ``SELECT COUNT(*) FROM chunks_fts`` proxies
+    # back to the chunks table, so it always equals ``chunks_count`` and
+    # can't tell us whether the index itself is populated. The shadow
+    # ``chunks_fts_docsize`` table has one row per *indexed* document.
+    async with db.execute("SELECT COUNT(*) FROM chunks_fts_docsize") as cur:
+        fts_count = (await cur.fetchone())[0]
+    if fts_count >= chunks_count:
+        return
+
+    logger.info(
+        "Backfilling %d chunk(s) into FTS index (had %d)",
+        chunks_count,
+        fts_count,
+    )
+    # External-content FTS5 must be populated via the 'rebuild' command —
+    # a plain INSERT only writes the shadow content row, not the index.
+    await db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
 
 
 async def migrate(db: aiosqlite.Connection) -> None:
