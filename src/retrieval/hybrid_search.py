@@ -1,136 +1,196 @@
-"""Hybrid Retrieval Engine w/ Intent Routing.
+"""Hybrid retrieval engine — BM25 + vectors + graph context.
 
-Implements the 'Holy Grail' intent-based RAG search:
-1. LanceDB (Dense Vector Search) + SQLite FTS (BM25 Keyword Search)
-2. Intent Router (Specific vs Multi-Hop vs Global Theme)
-3. HippoRAG (Personalized PageRank traversal over KuzuDB for complex reasoning)
-4. MS GraphRAG (Retrieving lazily generated Community Summaries)
+1. Classify the query via :class:`IntentRouter`.
+2. ``global_theme``  → return community summaries from Kuzu.
+3. ``multi_hop``     → still runs hybrid retrieval, but enriches the
+   result with N-hop graph context from Kuzu.
+4. ``specific``      → Reciprocal Rank Fusion (RRF) over BM25 and
+   vector hits; no graph traversal.
+
+LanceDB results are adapted via ``_as_hit`` so a schema drift (missing
+key, rename) surfaces as a log warning rather than a ``KeyError``
+inside the fusion loop.
 """
 
-from typing import List, Dict, Any
-from collections import defaultdict
-import logging
-import re
+from __future__ import annotations
 
+import logging
+from collections import defaultdict
+from typing import Any
+
+from src.retrieval.intent_router import IntentRouter
 from src.utils.config import Settings
-from src.vault.sqlite_engine import SQLiteEngine
-from src.vault.lance_engine import LanceEngine
 from src.vault.kuzu_store import KuzuStore
+from src.vault.lance_engine import LanceEngine
+from src.vault.sqlite_engine import SQLiteEngine
 
 logger = logging.getLogger(__name__)
 
+
+def _as_hit(raw: dict[str, Any], *, source: str) -> dict[str, Any] | None:
+    """Normalise a backend-specific result dict to a common shape."""
+    # Vector hits use ``id``; FTS hits use ``chunk_id``. Accept both.
+    chunk_id = raw.get("chunk_id") or raw.get("id")
+    if not chunk_id:
+        logger.warning("%s result missing chunk id: %r", source, sorted(raw.keys()))
+        return None
+    return {
+        "chunk_id": chunk_id,
+        "file_id": raw.get("file_id"),
+        "path": raw.get("path"),
+        "content": raw.get("content", ""),
+        "snippet": raw.get("snippet"),
+        "score": raw.get("score", 0.0),
+        "source": source,
+    }
+
+
 class HybridSearchEngine:
-    def __init__(self, sqlite: SQLiteEngine, lance: LanceEngine, kuzu: KuzuStore, settings: Settings, rrf_k: int = 60) -> None:
+    def __init__(
+        self,
+        sqlite: SQLiteEngine,
+        lance: LanceEngine,
+        kuzu: KuzuStore,
+        settings: Settings,
+        *,
+        rrf_k: int = 60,
+        router: IntentRouter | None = None,
+    ) -> None:
         self.sqlite = sqlite
         self.lance = lance
         self.kuzu = kuzu
         self.settings = settings
         self.rrf_k = rrf_k
+        self.router = router or IntentRouter(
+            enable_global=settings.enable_ms_graphrag_summarization,
+            enable_multihop=(
+                settings.enable_hipporag_pagerank and settings.enable_graphrag
+            ),
+        )
 
-    def _determine_intent(self, query: str) -> str:
-        """Simple NLP heuristic router."""
-        q = query.lower()
-        
-        # 1. Look for MS GraphRAG Global Theme Intent
-        if self.settings.enable_ms_graphrag_summarization:
-            if any(w in q for w in ["summarize", "summary", "main themes", "overview", "big picture"]):
-                return "global_theme"
-                
-        # 2. Look for HippoRAG Multi-Hop Intent
-        if self.settings.enable_hipporag_pagerank and self.settings.enable_graphrag:
-            if any(w in q for w in ["relate", "connect", "influence", "affect", "how does", "path between", "relationship"]):
-                return "multi_hop"
-                
-        # 3. Default Specific Fact / Standard hybrid RAG
-        return "specific"
+    async def search(
+        self,
+        query: str,
+        query_embedding: list[float] | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        intent = self.router.classify(query)
+        logger.info("HybridSearchEngine: query=%r lane=%s", query, intent)
 
-    async def search(self, query: str, query_embedding: List[float] = None, limit: int = 10) -> Dict[str, Any]:
-        """Route the query to the best RAG algorithmic lane."""
-        
-        intent = self._determine_intent(query)
-        logger.info("HybridSearchEngine: Routed query '%s' to lane '%s'", query, intent)
-        
-        # --- Microsoft GraphRAG Global Community Lane ---
         if intent == "global_theme":
-            summaries = []
-            try:
-                # Naive match for our summary nodes
-                q = "MATCH (e:Entity) WHERE e.lbl_type = 'Community Summary' RETURN e.id, e.description"
-                res = self.kuzu._conn.execute(q)
-                while res.has_next():
-                    row = res.get_next()
-                    summaries.append({
-                        "summary_id": row[0],
-                        "summary": row[1]
-                    })
-            except Exception as e:
-                logger.error("KuzuDB summary retrieval failed: %s", e)
-                
+            summaries = await self._safe_call(
+                self.kuzu.get_community_summaries, limit=limit
+            )
             return {
                 "query": query,
                 "lane": "global_theme",
-                "chunks": [], # We bypass the chunks entirely for high level overviews!
-                "graph_context": summaries
+                "chunks": [],
+                "graph_context": summaries or [],
             }
-            
-        # --- Standard Vector/BM25 Setup ---
-        vector_results = []
-        if query_embedding:
-            try:
-                vector_results = await self.lance.search(query_embedding, limit=limit)
-            except Exception as e:
-                logger.error("LanceDB search failed: %s", e)
 
-        keyword_results = []
-        if query.strip():
-            try:
-                keyword_results = await self.sqlite.search_chunks(query, limit=limit)
-            except Exception as e:
-                logger.error("SQLite FTS search failed: %s", e)
+        chunks = await self._fused_chunks(query, query_embedding, limit)
 
-        # Merge using Reciprocal Rank Fusion (RRF)
-        rrf_scores = defaultdict(float)
-        items = {}
-        for rank, res in enumerate(vector_results, start=1):
-            chunk_id = res['id']
-            rrf_scores[chunk_id] += 1.0 / (self.rrf_k + rank)
-            if chunk_id not in items:
-                items[chunk_id] = {"chunk_id": chunk_id, "content": res["content"], "vector_score": res["score"], "keyword_score": 0.0}
-
-        for rank, res in enumerate(keyword_results, start=1):
-            chunk_id = res['chunk_id']
-            rrf_scores[chunk_id] += 1.0 / (self.rrf_k + rank)
-            if chunk_id not in items:
-                items[chunk_id] = {"chunk_id": chunk_id, "content": res["content"], "vector_score": 0.0, "keyword_score": res["score"]}
-            else:
-                items[chunk_id]["keyword_score"] = res["score"]
-
-        sorted_chunks = sorted([(chunk_id, rrf_scores[chunk_id]) for chunk_id in rrf_scores], key=lambda x: x[1], reverse=True)[:limit]
-        final_chunks = [dict(items[c_id], rrf_score=score) for c_id, score in sorted_chunks]
-
-        # --- HippoRAG Multi-Hop PageRank Lane ---
-        graph_context = []
+        graph_context: list[dict[str, Any]] = []
         if intent == "multi_hop":
-            try:
-                entities = self.kuzu.get_all_entities()
-                # Find "Query Nodes" (matches in the text)
-                matched_entities = [e for e in entities if e["name"].lower() in query.lower()]
-                
-                # If we were using actual PageRank via KuzuDB Graph Algorithms, we would propagate 
-                # scores from these matched_nodes. For now we mock it with a 2-hop spread.
-                for ent in matched_entities:
-                    related = self.kuzu.get_context_for_entity(ent["id"], hop_limit=2)
-                    graph_context.append({
-                        "hippo_query_node": ent["name"],
-                        "multi_hop_pagerank_results": related
-                    })
-                    
-            except Exception as e:
-                logger.error("Kuzu Graph HippoRAG extraction failed: %s", e)
+            graph_context = await self._graph_context_for(query, limit)
 
         return {
             "query": query,
             "lane": intent,
-            "chunks": final_chunks,
-            "graph_context": graph_context
+            "chunks": chunks,
+            "graph_context": graph_context,
         }
+
+    # ── Helpers ────────────────────────────────────────────
+
+    async def _fused_chunks(
+        self,
+        query: str,
+        query_embedding: list[float] | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        vector_hits: list[dict[str, Any]] = []
+        if query_embedding:
+            raw = await self._safe_call(
+                self.lance.search, query_embedding, limit=limit
+            )
+            vector_hits = [h for h in (_as_hit(r, source="vector") for r in raw or []) if h]
+
+        keyword_hits: list[dict[str, Any]] = []
+        if query and query.strip():
+            raw = await self._safe_call(self.sqlite.search_chunks, query, limit=limit)
+            keyword_hits = [h for h in (_as_hit(r, source="keyword") for r in raw or []) if h]
+
+        return self._rrf(vector_hits, keyword_hits, limit=limit)
+
+    def _rrf(
+        self,
+        vector_hits: list[dict[str, Any]],
+        keyword_hits: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Reciprocal Rank Fusion across two ranked lists."""
+        scores: dict[str, float] = defaultdict(float)
+        items: dict[str, dict[str, Any]] = {}
+
+        for rank, hit in enumerate(vector_hits, start=1):
+            cid = hit["chunk_id"]
+            scores[cid] += 1.0 / (self.rrf_k + rank)
+            items.setdefault(cid, dict(hit, vector_score=hit["score"], keyword_score=0.0))
+
+        for rank, hit in enumerate(keyword_hits, start=1):
+            cid = hit["chunk_id"]
+            scores[cid] += 1.0 / (self.rrf_k + rank)
+            if cid in items:
+                items[cid]["keyword_score"] = hit["score"]
+                # Keyword results carry richer fields (snippet, path) —
+                # prefer them when we have them.
+                for key in ("snippet", "path", "file_id"):
+                    if items[cid].get(key) is None and hit.get(key) is not None:
+                        items[cid][key] = hit[key]
+            else:
+                items[cid] = dict(hit, vector_score=0.0, keyword_score=hit["score"])
+
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+        return [dict(items[cid], rrf_score=score) for cid, score in ranked]
+
+    async def _graph_context_for(
+        self, query: str, limit: int
+    ) -> list[dict[str, Any]]:
+        entities = await self._safe_call(self.kuzu.get_all_entities)
+        if not entities:
+            return []
+
+        q_lower = query.lower()
+        q_tokens = set(q_lower.split())
+        # Match entities whose name appears as a whole-word substring in
+        # the query. Cheap; accurate enough for short queries.
+        matched = [
+            e
+            for e in entities
+            if e.get("name") and e["name"].lower() in q_lower
+            # quick reject for entities longer than the query
+        ][: max(1, limit)]
+
+        context: list[dict[str, Any]] = []
+        for ent in matched:
+            related = await self._safe_call(
+                self.kuzu.get_context_for_entity, ent["id"], hop_limit=2
+            )
+            context.append(
+                {
+                    "query_entity": ent["name"],
+                    "related_entities": related or [],
+                }
+            )
+        return context
+
+    @staticmethod
+    async def _safe_call(fn, *args, **kwargs):
+        """Run an awaitable and swallow + log exceptions."""
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as exc:
+            logger.warning("%s failed: %s", getattr(fn, "__qualname__", fn), exc)
+            return None

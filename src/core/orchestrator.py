@@ -23,13 +23,14 @@ from src.janitor.sync import JournalSync
 from src.janitor.tombstone import TombstoneCascade
 from src.janitor.graph_extractor import GraphExtractor
 from src.janitor.community_summarizer import CommunitySummarizer
+from src.retrieval.extractors import EntityExtractor, HeuristicExtractor
+from src.retrieval.hybrid_search import HybridSearchEngine
 from src.router_handoff.backpressure_queue import BackpressureQueue
+from src.vault.kuzu_store import KuzuStore
 from src.vault.lance_engine import LanceEngine
 from src.vault.ref_counting import RefCounter
 from src.vault.sqlite_engine import SQLiteEngine
 from src.vault.subscriptions import SubscriptionManager
-from src.vault.kuzu_store import KuzuStore
-from src.retrieval.hybrid_search import HybridSearchEngine
 
 if TYPE_CHECKING:
     from src.utils.config import Settings
@@ -40,8 +41,14 @@ logger = logging.getLogger(__name__)
 class Orchestrator:
     """Coordinates all LocalBrain subsystems."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        entity_extractor: EntityExtractor | None = None,
+    ) -> None:
         self.settings = settings
+        self._entity_extractor = entity_extractor
 
         # ── Subsystems (initialised in .start()) ────────
         self.scope_gate: ScopeGate | None = None
@@ -68,6 +75,18 @@ class Orchestrator:
 
         self._tasks: list[asyncio.Task] = []
 
+    # ── Feature detection ───────────────────────────────
+
+    def _graph_enabled(self) -> bool:
+        """True when any GraphRAG feature toggle is on."""
+        s = self.settings
+        return bool(
+            s.enable_graphrag
+            or s.enable_lightrag_incremental
+            or s.enable_ms_graphrag_summarization
+            or s.enable_hipporag_pagerank
+        )
+
     # ── Lifecycle ───────────────────────────────────────
 
     async def start(self) -> None:
@@ -90,12 +109,18 @@ class Orchestrator:
         self.lance = LanceEngine(str(data_dir / "lance"))
         await self.lance.open()
 
-        self.kuzu = KuzuStore(str(data_dir / "kuzu"))
-        self.kuzu.open()
-
-        self.hybrid_search = HybridSearchEngine(
-            sqlite=self.engine, lance=self.lance, kuzu=self.kuzu, settings=self.settings
-        )
+        # Kuzu is only needed for the GraphRAG stack. Skip it entirely
+        # when every graph feature is off — saves a few MB of disk and
+        # process memory on vanilla installs.
+        if self._graph_enabled():
+            self.kuzu = KuzuStore(str(data_dir / "kuzu"))
+            await self.kuzu.open()
+            self.hybrid_search = HybridSearchEngine(
+                sqlite=self.engine,
+                lance=self.lance,
+                kuzu=self.kuzu,
+                settings=self.settings,
+            )
 
         self.subscriptions = SubscriptionManager(self.engine.db)
         self.ref_counter = RefCounter(self.engine.db)
@@ -137,7 +162,11 @@ class Orchestrator:
 
         # Janitor
         self.tombstone = TombstoneCascade(
-            self.engine, self.lance, self.subscriptions, self.ref_counter
+            self.engine,
+            self.lance,
+            self.subscriptions,
+            self.ref_counter,
+            kuzu=self.kuzu,
         )
         self.journal_sync = JournalSync(self.engine)
         self.reindex_manager = ReindexManager(
@@ -145,8 +174,14 @@ class Orchestrator:
             self.subscriptions,
             threshold=self.settings.janitor_reindex_threshold,
         )
-        self.graph_extractor = GraphExtractor(self.engine, self.kuzu, self.settings)
-        self.community_summarizer = CommunitySummarizer(self.engine, self.kuzu, self.settings)
+        if self.kuzu is not None:
+            extractor = self._entity_extractor or HeuristicExtractor()
+            self.graph_extractor = GraphExtractor(
+                self.engine, self.kuzu, self.settings, extractor=extractor
+            )
+            self.community_summarizer = CommunitySummarizer(
+                self.kuzu, self.settings
+            )
 
         # Background tasks
         self._tasks.append(asyncio.create_task(self._watch_loop(), name="watcher"))
@@ -171,7 +206,7 @@ class Orchestrator:
         if self.lance:
             await self.lance.close()
         if self.kuzu:
-            self.kuzu.close()
+            await self.kuzu.close()
         if self.engine:
             await self.engine.close()
 
@@ -214,11 +249,11 @@ class Orchestrator:
                         logger.info("Re-indexing file %s", file_id)
                         await self.reindex_manager.mark_done(file_id)
 
-                # 4. GraphRAG slow Distillation background job
-                await self.graph_extractor.run_batch()
-
-                # 5. MS GraphRAG Community Summarization background job
-                await self.community_summarizer.run_batch()
+                # 4. GraphRAG extraction + community summarization
+                if self.graph_extractor is not None:
+                    await self.graph_extractor.run_batch()
+                if self.community_summarizer is not None:
+                    await self.community_summarizer.run_batch()
 
         except asyncio.CancelledError:
             pass

@@ -387,6 +387,53 @@ erDiagram
 
 ---
 
+## Graph Subsystem (optional, off by default)
+
+When `LOCALBRAIN_ENABLE_GRAPHRAG=true`, the orchestrator spins up a
+parallel retrieval stack alongside FTS5 + LanceDB:
+
+- **KuzuStore** (`src/vault/kuzu_store.py`) — embedded Kuzu graph DB
+  wrapped with `asyncio.to_thread` + an `asyncio.Lock` so its
+  synchronous driver plays nicely with the rest of the async app.
+  Entity IDs are stable SHA1 hashes of `(type::name.lower())` so
+  re-ingests are idempotent and cross-chunk entities deduplicate.
+- **GraphExtractor** (`src/janitor/graph_extractor.py`) — pulls chunks
+  where `graph_extracted_at IS NULL` (via a partial index), runs them
+  through a pluggable `EntityExtractor` Protocol, upserts nodes/edges
+  into Kuzu, and stamps the chunk row. The bundled `HeuristicExtractor`
+  is a capitalised-span stub; `RouterLLMExtractor` delegates to the
+  Router app.
+- **CommunitySummarizer** (`src/janitor/community_summarizer.py`) —
+  periodically runs `greedy_modularity_communities` (networkx) over
+  the entity graph and writes per-community summaries to Kuzu.
+- **HybridSearchEngine** (`src/retrieval/hybrid_search.py`) — RRF-fuses
+  BM25 and vector hits, then consults the `IntentRouter` to decide
+  whether to inject graph context (multi-hop traversal) or swap in
+  community summaries (global_theme).
+- **TombstoneCascade** now also calls `KuzuStore.delete_chunks()` so
+  purged files sweep their orphan entities out of the graph.
+
+```
+           ┌──────────────┐      ┌─────────────────┐
+chunks ───▶│ GraphExtract │─────▶│   KuzuStore     │◀─── TombstoneCascade
+           └──────────────┘      │  (Entity/Chunk, │
+                                 │  Mentions/Rel,  │
+           ┌──────────────┐      │  CommunitySumm) │
+           │ CommunitySum │─────▶│                 │
+           └──────────────┘      └────────┬────────┘
+                                          │
+                      IntentRouter ──▶ HybridSearchEngine ──▶ /v1/search?mode=hybrid
+                                          ▲
+                        FTS5 ─────────────┤
+                        LanceDB ──────────┘
+```
+
+All four `LOCALBRAIN_ENABLE_*` toggles default to `false`. Flip them on
+in concert; leaving only one on yields a degraded lane rather than
+hybrid search.
+
+---
+
 ## Background Task Lifecycle
 
 ```mermaid

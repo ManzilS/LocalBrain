@@ -35,13 +35,14 @@ CREATE TABLE IF NOT EXISTS files (
 
 _CREATE_CHUNKS = """
 CREATE TABLE IF NOT EXISTS chunks (
-    id          TEXT PRIMARY KEY,
-    content     TEXT    NOT NULL DEFAULT '',
-    fingerprint TEXT    NOT NULL UNIQUE,
-    byte_offset INTEGER NOT NULL DEFAULT 0,
-    byte_length INTEGER NOT NULL DEFAULT 0,
-    ref_count   INTEGER NOT NULL DEFAULT 0,
-    metadata    TEXT    NOT NULL DEFAULT '{}'
+    id                  TEXT PRIMARY KEY,
+    content             TEXT    NOT NULL DEFAULT '',
+    fingerprint         TEXT    NOT NULL UNIQUE,
+    byte_offset         INTEGER NOT NULL DEFAULT 0,
+    byte_length         INTEGER NOT NULL DEFAULT 0,
+    ref_count           INTEGER NOT NULL DEFAULT 0,
+    metadata            TEXT    NOT NULL DEFAULT '{}',
+    graph_extracted_at  REAL
 );
 """
 
@@ -85,6 +86,7 @@ _INDICES = [
     "CREATE INDEX IF NOT EXISTS idx_files_status      ON files(status);",
     "CREATE INDEX IF NOT EXISTS idx_files_fingerprint ON files(fingerprint);",
     "CREATE INDEX IF NOT EXISTS idx_chunks_fp         ON chunks(fingerprint);",
+    "CREATE INDEX IF NOT EXISTS idx_chunks_graph_pending ON chunks(graph_extracted_at) WHERE graph_extracted_at IS NULL;",
     "CREATE INDEX IF NOT EXISTS idx_fc_file           ON file_chunks(file_id);",
     "CREATE INDEX IF NOT EXISTS idx_fc_chunk          ON file_chunks(chunk_id);",
     "CREATE INDEX IF NOT EXISTS idx_queue_lane        ON queue(lane, priority);",
@@ -135,6 +137,7 @@ async def ensure_schema(db: aiosqlite.Connection) -> None:
 
     for ddl in _ALL_DDL:
         await db.execute(ddl)
+    await _migrate_chunks_graph_column(db)
     for idx in _INDICES:
         await db.execute(idx)
 
@@ -179,6 +182,15 @@ async def _backfill_chunks_fts(db: aiosqlite.Connection) -> None:
     # External-content FTS5 must be populated via the 'rebuild' command —
     # a plain INSERT only writes the shadow content row, not the index.
     await db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
+
+
+async def _migrate_chunks_graph_column(db: aiosqlite.Connection) -> None:
+    """Add ``chunks.graph_extracted_at`` to pre-GraphRAG vaults."""
+    async with db.execute("PRAGMA table_info(chunks)") as cur:
+        cols = {row[1] for row in await cur.fetchall()}
+    if "graph_extracted_at" not in cols:
+        logger.info("Adding graph_extracted_at column to chunks")
+        await db.execute("ALTER TABLE chunks ADD COLUMN graph_extracted_at REAL")
 
 
 async def migrate(db: aiosqlite.Connection) -> None:

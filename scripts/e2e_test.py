@@ -1,93 +1,112 @@
-"""End-to-end test of LocalBrainFull.
+"""End-to-end smoke test of LocalBrain's GraphRAG stack.
 
-This script tests:
-1. Ingestion of a file into SQLite and LanceDB (Tier 1).
-2. The GraphExtractor (Tier 2 LightRAG extraction).
-3. The CommunitySummarizer (Tier 3 MS GraphRAG summarization).
-4. The HybridSearchEngine intent-router (Specific, Global Theme, Multi-Hop).
+Runs entirely inside a temporary directory — never touches the user's
+real Documents folder.
+
+Exercises:
+1. Ingestion → SQLite + LanceDB (Tier 1)
+2. GraphExtractor (Tier 2 incremental graph build)
+3. CommunitySummarizer (Tier 3 global summaries)
+4. HybridSearchEngine intent routing (specific / multi-hop / global)
 """
 
+from __future__ import annotations
+
 import asyncio
-import os
-import shutil
+import json
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 
-from src.utils.config import Settings
-from src.core.orchestrator import Orchestrator
 from src.core.models import EventType, FileIdentity, IngestEvent
+from src.core.orchestrator import Orchestrator
+from src.utils.config import Settings
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-async def main():
-    import uuid
-    # 1. Setup temporary testing environment
-    test_dir = Path(f"test_localbrain_{uuid.uuid4().hex[:8]}")
-    if test_dir.exists():
-        shutil.rmtree(test_dir, ignore_errors=True)
-    test_dir.mkdir(exist_ok=True)
 
-    # Create dummy config and files
-    settings = Settings(data_dir=str(test_dir), debounce_ms=0, settle_time_ms=0)
-    
-    # Needs access.config.json and plugins.yaml in root (they exist in the repo)
+async def main() -> None:
+    root = Path(tempfile.mkdtemp(prefix="localbrain_e2e_"))
+    data_dir = root / "data"
+    watch_dir = root / "watched"
+    access_path = root / "access.config.json"
+    data_dir.mkdir()
+    watch_dir.mkdir()
+
+    # Sandboxed scope-gate config — only the temp dir is allowed.
+    access_path.write_text(
+        json.dumps(
+            {
+                "watch_roots": [str(watch_dir)],
+                "include_patterns": [],
+                "exclude_patterns": [],
+                "blocked_extensions": [],
+                "max_file_size_bytes": 10_485_760,
+                "follow_symlinks": False,
+            }
+        )
+    )
+
+    # Force-enable the GraphRAG stack for this run only.
+    settings = Settings(
+        data_dir=str(data_dir),
+        access_config=str(access_path),
+        debounce_ms=0,
+        settle_time_ms=0,
+        enable_graphrag=True,
+        enable_lightrag_incremental=True,
+        enable_ms_graphrag_summarization=True,
+        enable_hipporag_pagerank=True,
+    )
+
     orch = Orchestrator(settings)
     await orch.start()
+    try:
+        print("\n--- [1] TIER 1: INGESTION ---")
+        doc = watch_dir / "frankenstein_summary.txt"
+        doc.write_text(
+            "Victor Frankenstein was a scientist who created an unnatural monster. "
+            "The creature demanded a mate, causing Victor great distress and leading "
+            "to a tragic confrontation in the frozen north."
+        )
 
-    print("\n--- [TEST 1] TIER 1: INSTANT INGESTION ---")
-    # Create a test file in the allowed scope_gate directory
-    project_dir = Path("C:/Users/manzi/Documents/Projects")
-    project_dir.mkdir(parents=True, exist_ok=True)
-    dummy_file = project_dir / "frankenstein_summary.txt"
-    dummy_file.write_text("Victor Frankenstein was a scientist who created an unnatural monster. The creature demanded a mate, causing Victor great distress and leading to a tragic confrontation in the frozen north.")
+        await orch.scheduler.enqueue(
+            IngestEvent(
+                event_type=EventType.created,
+                file_identity=FileIdentity(path=str(doc)),
+            )
+        )
+        await asyncio.sleep(2)
 
-    event = IngestEvent(
-        event_type=EventType.created,
-        file_identity=FileIdentity(path=str(dummy_file.absolute())),
-    )
-    
-    # Force ingest
-    await orch.scheduler.enqueue(event)
-    await asyncio.sleep(2) # Give pipeline time to process
-    
-    # Check SQLite
-    chunks = await orch.engine.search_chunks("Victor", limit=5)
-    print(f"SQLite search returned {len(chunks)} chunks for 'Victor'.")
+        hits = await orch.engine.search_chunks("Victor", limit=5)
+        print(f"SQLite FTS hits for 'Victor': {len(hits)}")
 
-    print("\n--- [TEST 2] TIER 2: LIGHTRAG GRAPH EXTRACTION ---")
-    # Force Graph extractor to run instead of waiting 5 mins
-    processed = await orch.graph_extractor.run_batch()
-    print(f"GraphExtractor processed {processed} chunk(s).")
-    
-    print("\n--- [TEST 3] TIER 3: MS GRAPHRAG COMMUNITY SUMMARIZATION ---")
-    summarized = await orch.community_summarizer.run_batch()
-    print(f"CommunitySummarizer generated {summarized} summary(s).")
+        print("\n--- [2] TIER 2: GRAPH EXTRACTION ---")
+        processed = await orch.graph_extractor.run_batch()
+        print(f"GraphExtractor processed {processed} chunk(s).")
 
-    print("\n--- [TEST 4] HYBRID RAG INTENT ROUTING ---")
-    
-    # A. Specific Fact Search (Vector/BM25)
-    print("\n-> Testing Specific Lane:")
-    res_specific = await orch.hybrid_search.search("Where did the confrontation happen?")
-    print(f"   Lane chosen: {res_specific['lane']}")
-    print(f"   Chunks found: {len(res_specific['chunks'])}")
+        print("\n--- [3] TIER 3: COMMUNITY SUMMARIZATION ---")
+        summarized = await orch.community_summarizer.run_batch()
+        print(f"CommunitySummarizer generated {summarized} summary(ies).")
 
-    # B. Multi-hop HippoRAG Search
-    print("\n-> Testing Multi-Hop Lane:")
-    res_hop = await orch.hybrid_search.search("How does Victor connect to the frozen north?")
-    print(f"   Lane chosen: {res_hop['lane']}")
-    print(f"   Graph Context Nodes extracted: {len(res_hop['graph_context'])}")
+        print("\n--- [4] HYBRID SEARCH INTENT ROUTING ---")
+        for label, query in [
+            ("specific", "Where did the confrontation happen?"),
+            ("multi_hop", "How does Victor connect to the frozen north?"),
+            ("global_theme", "Give me a summary of the main themes."),
+        ]:
+            res = await orch.hybrid_search.search(query)
+            print(
+                f"  [{label}] lane={res['lane']} "
+                f"chunks={len(res['chunks'])} graph_ctx={len(res['graph_context'])}"
+            )
 
-    # C. Global Theme MS GraphRAG Search
-    print("\n-> Testing Global Theme Lane:")
-    res_theme = await orch.hybrid_search.search("Give me a summary of the main themes.")
-    print(f"   Lane chosen: {res_theme['lane']}")
-    print(f"   Global Summaries extracted: {len(res_theme['graph_context'])}")
-    if res_theme['graph_context']:
-        print(f"   Summary excerpt: {res_theme['graph_context'][0]['summary'][:100]}...")
+        print("\nAll tests completed.")
+    finally:
+        await orch.stop()
+        shutil.rmtree(root, ignore_errors=True)
 
-    # Cleanup
-    await orch.stop()
-    print("\nAll Tests Completed Successfully!")
 
 if __name__ == "__main__":
     asyncio.run(main())

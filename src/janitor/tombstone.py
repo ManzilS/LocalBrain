@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+from src.vault.kuzu_store import KuzuStore
 from src.vault.lance_engine import LanceEngine
 from src.vault.ref_counting import RefCounter
 from src.vault.sqlite_engine import SQLiteEngine
@@ -26,11 +27,13 @@ class TombstoneCascade:
         lance: LanceEngine,
         subscriptions: SubscriptionManager,
         ref_counter: RefCounter,
+        kuzu: KuzuStore | None = None,
     ) -> None:
         self._engine = engine
         self._lance = lance
         self._subs = subscriptions
         self._refs = ref_counter
+        self._kuzu = kuzu
 
     async def mark_deleted(self, file_id: str) -> None:
         """Soft-delete a file and decrement chunk ref counts."""
@@ -63,6 +66,13 @@ class TombstoneCascade:
                 await self._lance.delete_by_chunk_ids(orphans)
             except Exception:
                 logger.exception("Failed to delete orphan chunks from LanceDB")
+
+            # Remove from Kuzu graph — cascades orphan entities.
+            if self._kuzu is not None:
+                try:
+                    await self._kuzu.delete_chunks(orphans)
+                except Exception:
+                    logger.exception("Failed to delete orphan chunks from Kuzu")
 
             # Remove from SQLite
             for oid in orphans:

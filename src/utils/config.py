@@ -44,9 +44,15 @@ class Settings(BaseSettings):
     max_body_size: int = Field(default=10_485_760, ge=1)
     request_timeout: float = Field(default=30.0, gt=0)
 
-    # Holy Grail Graph Architecture Toggles
-    enable_graphrag: bool = True
-    enable_lightrag_incremental: bool = True
-    enable_ms_graphrag_summarization: bool = True
-    enable_hipporag_pagerank: bool = True
+    # GraphRAG toggles. Off by default: the stock extractor/summarizer
+    # are heuristic-only and produce low-quality graphs. Enable once you
+    # wire a real LLM-backed extractor via ``GraphExtractor(extractor=…)``.
+    enable_graphrag: bool = False
+    enable_lightrag_incremental: bool = False
+    enable_ms_graphrag_summarization: bool = False
+    enable_hipporag_pagerank: bool = False
+    # Minimum entities needed before the community summarizer will run.
+    graph_summary_min_entities: int = Field(default=5, ge=1)
+    # Max chunks processed per graph-extraction batch.
+    graph_extract_batch_size: int = Field(default=8, ge=1)
 

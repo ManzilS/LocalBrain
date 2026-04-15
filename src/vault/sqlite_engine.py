@@ -214,6 +214,30 @@ class SQLiteEngine:
             rows = await cur.fetchall()
             return [r["fingerprint"] for r in rows]
 
+    # ── Graph extraction bookkeeping ────────────────────
+
+    async def get_chunks_pending_graph_extraction(self, limit: int = 8) -> list[Chunk]:
+        """Return chunks never seen by the graph extractor (oldest first)."""
+        async with self.db.execute(
+            "SELECT * FROM chunks WHERE graph_extracted_at IS NULL "
+            "ORDER BY rowid LIMIT ?",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [self._row_to_chunk(r) for r in rows]
+
+    async def mark_graph_extracted(self, chunk_ids: list[str]) -> None:
+        """Stamp chunks as graph-processed so they aren't retried."""
+        if not chunk_ids:
+            return
+        now = time.time()
+        placeholders = ",".join("?" * len(chunk_ids))
+        await self.db.execute(
+            f"UPDATE chunks SET graph_extracted_at = ? WHERE id IN ({placeholders})",
+            (now, *chunk_ids),
+        )
+        await self.db.commit()
+
     # ── Full-text search ────────────────────────────────
 
     async def search_chunks(self, query: str, *, limit: int = 10) -> list[dict]:

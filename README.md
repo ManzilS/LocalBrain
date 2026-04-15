@@ -355,6 +355,39 @@ Multi-term queries are ANDed (`q=quick+fox` matches chunks containing
 both words). `mode=semantic` is reserved for embedding search via the
 Router app and currently returns an empty result set with a note.
 
+### Hybrid / GraphRAG search
+
+`mode=hybrid` fuses BM25 and vector hits via Reciprocal Rank Fusion and
+optionally pulls graph context from KuzuDB. The response includes a
+`lane` field indicating which retrieval strategy the `IntentRouter` picked:
+
+- `specific` (default) — BM25 + vector hybrid, RRF-fused.
+- `multi_hop` — routed when the query contains relation/connection
+  keywords (e.g. "how does X relate to Y"). Expands via graph traversal.
+- `global_theme` — routed on summary/overview keywords. Uses cached
+  community summaries produced by the janitor.
+
+```bash
+curl "http://localhost:8090/v1/search?q=summarize+asyncio&mode=hybrid"
+```
+
+The hybrid endpoint returns `503` if the GraphRAG subsystem is disabled.
+All four flags below default to **off** — turn them on explicitly:
+
+| Variable                                      | Default | Purpose                                           |
+|-----------------------------------------------|---------|---------------------------------------------------|
+| `LOCALBRAIN_ENABLE_GRAPHRAG`                  | `false` | Master switch — enables KuzuStore + hybrid engine |
+| `LOCALBRAIN_ENABLE_HIPPORAG_PAGERANK`         | `false` | Multi-hop traversal lane                          |
+| `LOCALBRAIN_ENABLE_MS_GRAPHRAG_SUMMARIZATION` | `false` | Community summaries for `global_theme` lane       |
+| `LOCALBRAIN_ENABLE_LIGHTRAG_HYBRID`           | `false` | LightRAG-style hybrid blending                    |
+| `LOCALBRAIN_GRAPH_EXTRACT_BATCH_SIZE`         | `8`     | Chunks per extractor pass in the janitor          |
+| `LOCALBRAIN_GRAPH_SUMMARY_MIN_ENTITIES`       | `5`     | Min community size to bother summarising          |
+
+KuzuDB data lives at `{LOCALBRAIN_DATA_DIR}/kuzu`. The bundled
+`HeuristicExtractor` is a deliberately cheap capitalised-span stub —
+swap in `RouterLLMExtractor` (or your own `EntityExtractor` Protocol
+impl) for production-quality entities.
+
 ## API Endpoints
 
 | Method | Path                  | Description                          |
@@ -394,6 +427,12 @@ Router app and currently returns an empty result set with a note.
 | `LOCALBRAIN_RATE_LIMIT_RPM`       | `120`             | Requests per minute limit (>= 1)   |
 | `LOCALBRAIN_MAX_BODY_SIZE`        | `10485760`        | Max request body size in bytes (>= 1) |
 | `LOCALBRAIN_REQUEST_TIMEOUT`      | `30.0`            | HTTP request timeout in seconds (> 0) |
+| `LOCALBRAIN_ENABLE_GRAPHRAG`      | `false`           | Enable KuzuDB + hybrid retrieval engine |
+| `LOCALBRAIN_ENABLE_HIPPORAG_PAGERANK` | `false`       | Enable multi-hop graph traversal lane  |
+| `LOCALBRAIN_ENABLE_MS_GRAPHRAG_SUMMARIZATION` | `false` | Enable community summaries         |
+| `LOCALBRAIN_ENABLE_LIGHTRAG_HYBRID` | `false`         | Enable LightRAG-style hybrid blending |
+| `LOCALBRAIN_GRAPH_EXTRACT_BATCH_SIZE` | `8`           | Graph extractor chunks per pass (>= 1) |
+| `LOCALBRAIN_GRAPH_SUMMARY_MIN_ENTITIES` | `5`         | Min community size to summarise (>= 2) |
 
 ## Error Handling
 

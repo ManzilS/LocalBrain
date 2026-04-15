@@ -1,75 +1,94 @@
-"""Graph extraction worker for background processing.
+"""Incremental GraphRAG extraction worker.
 
-Runs in the background, continuously finding chunks that haven't been distilled
-into the KuzuDB graph. It reads the chunks, simulates passing them to
-an LLM (OpenMemoryLabs' Router), and extracts Entities + Relationships
-to build the GraphRAG Context.
+Walks ``chunks`` where ``graph_extracted_at IS NULL`` and pushes each
+through a pluggable :class:`EntityExtractor` into the Kuzu graph.
+Completion is persisted in SQLite, so restarts don't reprocess every
+chunk.
+
+The *quality* of the resulting graph is 100 % a function of the
+extractor you plug in. The default :class:`HeuristicExtractor` is a
+regex stub — fine for demos, not for real retrieval.
 """
 
-import asyncio
-import logging
-import uuid
-import re
-from typing import List
+from __future__ import annotations
 
-from src.vault.sqlite_engine import SQLiteEngine
-from src.vault.kuzu_store import KuzuStore
+import logging
+
+from src.retrieval.extractors import EntityExtractor, ExtractionResult, HeuristicExtractor
 from src.utils.config import Settings
+from src.vault.kuzu_store import KuzuStore, entity_id
+from src.vault.sqlite_engine import SQLiteEngine
 
 logger = logging.getLogger(__name__)
 
+
 class GraphExtractor:
-    def __init__(self, sqlite: SQLiteEngine, kuzu: KuzuStore, settings: Settings, batch_size: int = 5):
+    def __init__(
+        self,
+        sqlite: SQLiteEngine,
+        kuzu: KuzuStore,
+        settings: Settings,
+        extractor: EntityExtractor | None = None,
+    ) -> None:
         self.sqlite = sqlite
         self.kuzu = kuzu
         self.settings = settings
-        self.batch_size = batch_size
-        self._processed = set()  # In memory tracking for simplicity. In prod, use a column in sqlite
+        self.extractor: EntityExtractor = extractor or HeuristicExtractor()
 
     async def run_batch(self) -> int:
-        """Find pending chunks and mock extract logic."""
-        if not self.settings.enable_graphrag or not self.settings.enable_lightrag_incremental:
+        if not (
+            self.settings.enable_graphrag
+            and self.settings.enable_lightrag_incremental
+        ):
             return 0
-            
-        # We would typically do a SELECT on chunks that don't have a 'graph_extracted' flag
-        # For demonstration of the "slower background method", we just pick random chunks.
-        chunks_fp = await self.sqlite.get_all_chunk_fingerprints()
-        pending = [c for c in chunks_fp if c not in self._processed][:self.batch_size]
 
+        pending = await self.sqlite.get_chunks_pending_graph_extraction(
+            limit=self.settings.graph_extract_batch_size
+        )
         if not pending:
             return 0
 
-        for fp in pending:
-            chunk = await self.sqlite.get_chunk_by_fingerprint(fp)
-            if not chunk or not chunk.content:
-                self._processed.add(fp)
+        processed_ids: list[str] = []
+        for chunk in pending:
+            if not chunk.content:
+                processed_ids.append(chunk.id)  # nothing to do — still mark done
                 continue
-                
-            # Simulate a slow "LLM Router" distillation (GraphRAG Extraction)
-            await asyncio.sleep(0.5)
+            try:
+                result = await self.extractor.extract(chunk.id, chunk.content)
+            except Exception:
+                logger.exception(
+                    "Extractor %r failed on chunk %s", self.extractor.name, chunk.id
+                )
+                # Don't mark done — let the next run retry.
+                continue
 
-            # Heuristic Entity Extraction (since no real LLM API is available right now)
-            # Find capitalized words > 4 chars as dummy entities
-            words = re.findall(r'\b[A-Z][a-z]{3,}\b', chunk.content)
-            entities = list(set(words))[:3]
-            
-            # Insert the chunk into graph
-            self.kuzu.upsert_chunk(chunk.id, chunk.content)
+            await self._persist(chunk.id, chunk.content, result)
+            processed_ids.append(chunk.id)
 
-            # Insert entities
-            for ent in entities:
-                ent_id = f"ent_{ent.lower()}"
-                self.kuzu.upsert_entity(ent_id, ent, "Concept", f"Extracted from {chunk.id}")
-                self.kuzu.link_entity_to_chunk(ent_id, chunk.id)
-                logger.debug("GraphExtractor: Added Entity '%s'", ent)
-                
-            # Insert relationships between the found entities
-            if len(entities) > 1:
-                # connect first two
-                a, b = entities[0], entities[1]
-                self.kuzu.add_relationship(f"ent_{a.lower()}", f"ent_{b.lower()}", "Co-occurs in chunk", 0.8)
+        await self.sqlite.mark_graph_extracted(processed_ids)
+        logger.info(
+            "GraphExtractor[%s]: processed %d chunk(s)",
+            self.extractor.name,
+            len(processed_ids),
+        )
+        return len(processed_ids)
 
-            self._processed.add(fp)
-            
-        logger.info("GraphExtractor: distilled %d chunks to KuzuDB", len(pending))
-        return len(pending)
+    async def _persist(
+        self, chunk_id: str, content: str, result: ExtractionResult
+    ) -> None:
+        await self.kuzu.upsert_chunk(chunk_id, content)
+
+        # Map extractor-level names → stable entity IDs.
+        name_to_id: dict[str, str] = {}
+        for ent in result.entities:
+            eid = entity_id(ent.name, ent.entity_type)
+            name_to_id[ent.name] = eid
+            await self.kuzu.upsert_entity(eid, ent.name, ent.entity_type, ent.description)
+            await self.kuzu.link_entity_to_chunk(eid, chunk_id)
+
+        for rel in result.relations:
+            src = name_to_id.get(rel.source) or entity_id(rel.source)
+            dst = name_to_id.get(rel.target) or entity_id(rel.target)
+            if src == dst:
+                continue
+            await self.kuzu.add_relationship(src, dst, rel.description, rel.weight)

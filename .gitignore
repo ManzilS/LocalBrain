@@ -13,7 +13,14 @@ env/
 
 .env
 *.db
+*.db-shm
+*.db-wal
 *.lance/
+
+# Local test/run artifacts
+test_localbrain/
+test_localbrain_*/
+.localbrain/
 
 .mypy_cache/
 .pytest_cache/

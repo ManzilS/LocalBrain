@@ -1,135 +1,238 @@
-"""KuzuDB state engine — handles the GraphRAG Context (Nodes, Relationships).
+"""KuzuDB-backed graph store for the GraphRAG context.
 
-Manages Entities and their relationships extracted from chunks, facilitating
-multi-hop traversal to enrich the retrieval context.
+Kuzu's Python driver is synchronous; every method here offloads the
+blocking call via ``asyncio.to_thread`` so it plays nicely with the
+orchestrator's event loop.
 """
 
-import json
+from __future__ import annotations
+
+import asyncio
+import hashlib
 import logging
-import os
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any
 
 import kuzu
 
 logger = logging.getLogger(__name__)
 
+
+def entity_id(name: str, entity_type: str = "Concept") -> str:
+    """Deterministic entity key — case-insensitive name + type namespace.
+
+    Using a hash (not a raw lowercased string) avoids Cypher-injection
+    surprises and keeps the ID width bounded.
+    """
+    key = f"{entity_type.lower()}::{name.strip().lower()}"
+    return "ent_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+
 class KuzuStore:
-    """KuzuDB wrapper for the LocalBrain graph vault."""
+    """Async-friendly wrapper around a Kuzu graph database."""
 
     def __init__(self, db_path: str) -> None:
         self._path = db_path
         self._db: kuzu.Database | None = None
         self._conn: kuzu.Connection | None = None
+        # Kuzu's connection isn't documented as thread-safe; serialise.
+        self._lock = asyncio.Lock()
 
-    def open(self) -> None:
-        """Initialize the database and connection."""
+    # ── Lifecycle ──────────────────────────────────────────
+
+    async def open(self) -> None:
         Path(self._path).parent.mkdir(parents=True, exist_ok=True)
-        self._db = kuzu.Database(self._path)
-        self._conn = kuzu.Connection(self._db)
-        self._ensure_schema()
+
+        def _connect() -> tuple[kuzu.Database, kuzu.Connection]:
+            db = kuzu.Database(self._path)
+            return db, kuzu.Connection(db)
+
+        self._db, self._conn = await asyncio.to_thread(_connect)
+        await self._ensure_schema()
         logger.info("Kuzu vault opened: %s", self._path)
 
-    def close(self) -> None:
-        """Close the database and connection."""
-        if self._db:
-            # kuzu does not require explicit db close, just dropping references
-            self._conn = None
-            self._db = None
+    async def close(self) -> None:
+        # Kuzu releases resources when references drop.
+        self._conn = None
+        self._db = None
 
-    def _ensure_schema(self) -> None:
-        """Create Node and Rel tables if they do not exist."""
-        assert self._conn is not None
+    async def _execute(self, query: str, params: dict[str, Any] | None = None):
+        """Run a Cypher query on the worker thread with a lock held."""
+        assert self._conn is not None, "KuzuStore not opened"
+        conn = self._conn
+        async with self._lock:
+            return await asyncio.to_thread(conn.execute, query, params or {})
 
-        # Node Tables
-        try:
-            self._conn.execute("CREATE NODE TABLE Entity (id STRING, name STRING, lbl_type STRING, description STRING, PRIMARY KEY (id))")
-        except RuntimeError as e:
-            if "already exists" not in str(e).lower():
+    @staticmethod
+    def _rows(result: Any) -> list[list[Any]]:
+        """Drain a Kuzu QueryResult into a list of rows."""
+        rows: list[list[Any]] = []
+        while result.has_next():
+            rows.append(result.get_next())
+        return rows
+
+    # ── Schema ─────────────────────────────────────────────
+
+    async def _ensure_schema(self) -> None:
+        statements = [
+            "CREATE NODE TABLE IF NOT EXISTS Entity ("
+            "  id STRING, name STRING, lbl_type STRING, description STRING,"
+            "  PRIMARY KEY (id)"
+            ")",
+            "CREATE NODE TABLE IF NOT EXISTS Chunk ("
+            "  id STRING, content STRING, PRIMARY KEY (id)"
+            ")",
+            "CREATE REL TABLE IF NOT EXISTS Relates_To ("
+            "  FROM Entity TO Entity, description STRING, weight DOUBLE"
+            ")",
+            "CREATE REL TABLE IF NOT EXISTS Extracted_From ("
+            "  FROM Entity TO Chunk"
+            ")",
+            "CREATE NODE TABLE IF NOT EXISTS CommunitySummary ("
+            "  id STRING, summary STRING, size INT64, created_at DOUBLE,"
+            "  PRIMARY KEY (id)"
+            ")",
+            "CREATE REL TABLE IF NOT EXISTS Summarises ("
+            "  FROM CommunitySummary TO Entity"
+            ")",
+        ]
+        for stmt in statements:
+            try:
+                await self._execute(stmt)
+            except RuntimeError as exc:
+                # Older Kuzu builds don't support IF NOT EXISTS — fall back.
+                if "already exists" in str(exc).lower():
+                    continue
                 raise
-        
-        try:
-            self._conn.execute("CREATE NODE TABLE Chunk (id STRING, content STRING, PRIMARY KEY (id))")
-        except RuntimeError as e:
-            if "already exists" not in str(e).lower():
-                raise
 
-        # Rel Tables
-        try:
-            self._conn.execute("CREATE REL TABLE Relates_To (FROM Entity TO Entity, description STRING, weight DOUBLE)")
-        except RuntimeError as e:
-            if "already exists" not in str(e).lower():
-                raise
+    # ── Entities ───────────────────────────────────────────
 
-        try:
-            self._conn.execute("CREATE REL TABLE Extracted_From (FROM Entity TO Chunk)")
-        except RuntimeError as e:
-            if "already exists" not in str(e).lower():
-                raise
-
-    def upsert_entity(self, entity_id: str, name: str, entity_type: str, description: str) -> None:
-        """Insert or update an Entity node."""
-        assert self._conn is not None
-        self._conn.execute("MERGE (e:Entity {id: $id})", {"id": entity_id})
-        self._conn.execute(
-            "MATCH (e:Entity {id: $id}) SET e.name = $name, e.lbl_type = $type, e.description = $description_val",
-            {"id": entity_id, "name": name, "type": entity_type, "description_val": description}
+    async def upsert_entity(
+        self, entity_id: str, name: str, entity_type: str, description: str = ""
+    ) -> None:
+        await self._execute(
+            "MERGE (e:Entity {id: $id}) "
+            "ON CREATE SET e.name = $name, e.lbl_type = $type, e.description = $descr "
+            "ON MATCH  SET e.name = $name, e.lbl_type = $type, e.description = $descr",
+            {"id": entity_id, "name": name, "type": entity_type, "descr": description},
         )
 
-    def upsert_chunk(self, chunk_id: str, content: str) -> None:
-        """Insert a Chunk node."""
-        assert self._conn is not None
-        self._conn.execute("MERGE (c:Chunk {id: $id})", {"id": chunk_id})
-        self._conn.execute("MATCH (c:Chunk {id: $id}) SET c.content = $content", {"id": chunk_id, "content": content})
+    async def upsert_chunk(self, chunk_id: str, content: str) -> None:
+        await self._execute(
+            "MERGE (c:Chunk {id: $id}) "
+            "ON CREATE SET c.content = $content "
+            "ON MATCH  SET c.content = $content",
+            {"id": chunk_id, "content": content},
+        )
 
-    def add_relationship(self, source_id: str, target_id: str, description: str = "", weight: float = 1.0) -> None:
-        """Add a relationship between two Entities."""
-        assert self._conn is not None
-        self._conn.execute("MATCH (a:Entity {id: $source}), (b:Entity {id: $target}) MERGE (a)-[r:Relates_To]->(b)", {"source": source_id, "target": target_id})
-        self._conn.execute("MATCH (a:Entity {id: $source})-[r:Relates_To]->(b:Entity {id: $target}) SET r.description = $description_val, r.weight = $weight", 
-                           {"source": source_id, "target": target_id, "description_val": description, "weight": weight})
+    async def add_relationship(
+        self,
+        source_id: str,
+        target_id: str,
+        description: str = "",
+        weight: float = 1.0,
+    ) -> None:
+        await self._execute(
+            "MATCH (a:Entity {id: $src}), (b:Entity {id: $dst}) "
+            "MERGE (a)-[r:Relates_To]->(b) "
+            "ON CREATE SET r.description = $descr, r.weight = $weight "
+            "ON MATCH  SET r.description = $descr, r.weight = $weight",
+            {"src": source_id, "dst": target_id, "descr": description, "weight": weight},
+        )
 
-    def link_entity_to_chunk(self, entity_id: str, chunk_id: str) -> None:
-        """Link an Entity to the Chunk it was extracted from."""
-        assert self._conn is not None
-        query = """
-        MATCH (e:Entity {id: $entity}), (c:Chunk {id: $chunk})
-        MERGE (e)-[:Extracted_From]->(c)
-        """
-        self._conn.execute(query, {"entity": entity_id, "chunk": chunk_id})
+    async def link_entity_to_chunk(self, entity_id: str, chunk_id: str) -> None:
+        await self._execute(
+            "MATCH (e:Entity {id: $eid}), (c:Chunk {id: $cid}) "
+            "MERGE (e)-[:Extracted_From]->(c)",
+            {"eid": entity_id, "cid": chunk_id},
+        )
 
-    def get_context_for_entity(self, entity_id: str, hop_limit: int = 1) -> List[Dict[str, Any]]:
-        """Traverse the graph from an entity to find related contextual information."""
-        assert self._conn is not None
-        # Traverses up to hop_limit to find connected entities
-        query = f"""
-        MATCH (a:Entity {{id: $id}})-[r:Relates_To*1..{hop_limit}]-(b:Entity)
-        RETURN b.id AS id, b.name AS name, b.description AS description
-        LIMIT 50
-        """
-        results = self._conn.execute(query, {"id": entity_id})
-        context = []
-        while results.has_next():
-            row = results.get_next()
-            context.append({
-                "id": row[0],
-                "name": row[1],
-                "description": row[2]
-            })
-        return context
+    # ── Deletion / cascade ─────────────────────────────────
 
-    def get_all_entities(self) -> List[Dict[str, Any]]:
-        """Return all entities."""
-        assert self._conn is not None
-        query = "MATCH (e:Entity) RETURN e.id, e.name, e.lbl_type, e.description"
-        results = self._conn.execute(query)
-        entities = []
-        while results.has_next():
-            row = results.get_next()
-            entities.append({
-                "id": row[0],
-                "name": row[1],
-                "type": row[2],
-                "description": row[3]
-            })
-        return entities
+    async def delete_chunks(self, chunk_ids: list[str]) -> None:
+        """Delete chunk nodes; orphan entities are removed in a sweep."""
+        if not chunk_ids:
+            return
+        await self._execute(
+            "MATCH (c:Chunk) WHERE c.id IN $ids DETACH DELETE c", {"ids": chunk_ids}
+        )
+        # Sweep entities that no longer reference any chunk.
+        await self._execute(
+            "MATCH (e:Entity) "
+            "WHERE NOT EXISTS { MATCH (e)-[:Extracted_From]->(:Chunk) } "
+            "  AND e.lbl_type <> 'Summary' "
+            "DETACH DELETE e"
+        )
+
+    # ── Reads ──────────────────────────────────────────────
+
+    async def get_context_for_entity(
+        self, entity_id: str, hop_limit: int = 2, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        # Kuzu doesn't allow parameterising the variable-length lower/upper
+        # bounds, so we inline validated ints.
+        hop = max(1, min(int(hop_limit), 5))
+        lim = max(1, min(int(limit), 200))
+        result = await self._execute(
+            f"MATCH (a:Entity {{id: $id}})-[:Relates_To*1..{hop}]-(b:Entity) "
+            f"RETURN DISTINCT b.id, b.name, b.description LIMIT {lim}",
+            {"id": entity_id},
+        )
+        return [
+            {"id": r[0], "name": r[1], "description": r[2]} for r in self._rows(result)
+        ]
+
+    async def get_all_entities(self) -> list[dict[str, Any]]:
+        result = await self._execute(
+            "MATCH (e:Entity) RETURN e.id, e.name, e.lbl_type, e.description"
+        )
+        return [
+            {"id": r[0], "name": r[1], "type": r[2], "description": r[3]}
+            for r in self._rows(result)
+        ]
+
+    async def count_entities(self) -> int:
+        result = await self._execute("MATCH (e:Entity) RETURN COUNT(e)")
+        rows = self._rows(result)
+        return int(rows[0][0]) if rows else 0
+
+    async def get_relationships(self) -> list[tuple[str, str, float]]:
+        """Return (source_id, target_id, weight) tuples for all edges."""
+        result = await self._execute(
+            "MATCH (a:Entity)-[r:Relates_To]->(b:Entity) RETURN a.id, b.id, r.weight"
+        )
+        return [(r[0], r[1], float(r[2] or 1.0)) for r in self._rows(result)]
+
+    # ── Community summaries ────────────────────────────────
+
+    async def upsert_community_summary(
+        self, summary_id: str, summary: str, size: int, created_at: float
+    ) -> None:
+        await self._execute(
+            "MERGE (s:CommunitySummary {id: $id}) "
+            "ON CREATE SET s.summary = $summary, s.size = $size, s.created_at = $ts "
+            "ON MATCH  SET s.summary = $summary, s.size = $size, s.created_at = $ts",
+            {"id": summary_id, "summary": summary, "size": size, "ts": created_at},
+        )
+
+    async def link_summary_to_entity(self, summary_id: str, entity_id: str) -> None:
+        await self._execute(
+            "MATCH (s:CommunitySummary {id: $sid}), (e:Entity {id: $eid}) "
+            "MERGE (s)-[:Summarises]->(e)",
+            {"sid": summary_id, "eid": entity_id},
+        )
+
+    async def get_community_summaries(self, limit: int = 20) -> list[dict[str, Any]]:
+        lim = max(1, min(int(limit), 100))
+        result = await self._execute(
+            f"MATCH (s:CommunitySummary) "
+            f"RETURN s.id, s.summary, s.size, s.created_at "
+            f"ORDER BY s.created_at DESC LIMIT {lim}"
+        )
+        return [
+            {"id": r[0], "summary": r[1], "size": int(r[2] or 0), "created_at": r[3]}
+            for r in self._rows(result)
+        ]
+
+    async def clear_community_summaries(self) -> None:
+        await self._execute("MATCH (s:CommunitySummary) DETACH DELETE s")

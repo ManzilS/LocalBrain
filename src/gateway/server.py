@@ -179,12 +179,23 @@ async def search(
 
     if mode == "hybrid":
         if orch.hybrid_search is None:
-            return {"error": "Hybrid search engine not initialized"}
-        
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "query": q,
+                    "mode": "hybrid",
+                    "error": (
+                        "Hybrid search is disabled. Set LOCALBRAIN_ENABLE_GRAPHRAG=true "
+                        "(and related toggles) to enable the GraphRAG stack."
+                    ),
+                },
+            )
+
         results = await orch.hybrid_search.search(query=q, limit=limit)
         return {
             "query": q,
             "mode": "hybrid",
+            "lane": results.get("lane"),
             "results": results["chunks"],
             "graph_context": results.get("graph_context", []),
             "count": len(results["chunks"]),
