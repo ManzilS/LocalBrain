@@ -155,14 +155,13 @@ async def search(
     request: Request,
     q: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=100),
-    mode: str = Query("keyword", pattern="^(keyword|semantic)$"),
+    mode: str = Query("keyword", pattern="^(keyword|semantic|hybrid)$"),
 ) -> dict[str, Any]:
     """Search ingested chunks.
 
-    ``mode=keyword`` (default) runs an FTS5 full-text search entirely
-    inside LocalBrain — no Router required. ``mode=semantic`` is reserved
-    for embedding-based search via the Router app and returns an empty
-    result set with a note until that handoff is implemented here.
+    ``mode=keyword`` uses FTS5 full-text search.
+    ``mode=hybrid`` uses the dual-speed Vector+BM25+KuzuDB search.
+    ``mode=semantic`` is reserved for embedding-based search via the Router.
     """
     orch = request.app.state.orchestrator
 
@@ -174,8 +173,21 @@ async def search(
             "count": 0,
             "note": (
                 "Semantic search requires Router handoff for query embedding. "
-                "Use mode=keyword for local full-text search."
+                "Use mode=keyword or hybrid for local search."
             ),
+        }
+
+    if mode == "hybrid":
+        if orch.hybrid_search is None:
+            return {"error": "Hybrid search engine not initialized"}
+        
+        results = await orch.hybrid_search.search(query=q, limit=limit)
+        return {
+            "query": q,
+            "mode": "hybrid",
+            "results": results["chunks"],
+            "graph_context": results.get("graph_context", []),
+            "count": len(results["chunks"]),
         }
 
     results = await orch.engine.search_chunks(q, limit=limit)

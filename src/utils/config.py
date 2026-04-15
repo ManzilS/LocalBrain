@@ -43,3 +43,10 @@ class Settings(BaseSettings):
     rate_limit_rpm: int = Field(default=120, ge=1)
     max_body_size: int = Field(default=10_485_760, ge=1)
     request_timeout: float = Field(default=30.0, gt=0)
+
+    # Holy Grail Graph Architecture Toggles
+    enable_graphrag: bool = True
+    enable_lightrag_incremental: bool = True
+    enable_ms_graphrag_summarization: bool = True
+    enable_hipporag_pagerank: bool = True
+

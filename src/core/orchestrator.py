@@ -21,11 +21,15 @@ from src.ingress.watcher import FileWatcher
 from src.janitor.reindex import ReindexManager
 from src.janitor.sync import JournalSync
 from src.janitor.tombstone import TombstoneCascade
+from src.janitor.graph_extractor import GraphExtractor
+from src.janitor.community_summarizer import CommunitySummarizer
 from src.router_handoff.backpressure_queue import BackpressureQueue
 from src.vault.lance_engine import LanceEngine
 from src.vault.ref_counting import RefCounter
 from src.vault.sqlite_engine import SQLiteEngine
 from src.vault.subscriptions import SubscriptionManager
+from src.vault.kuzu_store import KuzuStore
+from src.retrieval.hybrid_search import HybridSearchEngine
 
 if TYPE_CHECKING:
     from src.utils.config import Settings
@@ -48,6 +52,8 @@ class Orchestrator:
 
         self.engine: SQLiteEngine | None = None
         self.lance: LanceEngine | None = None
+        self.kuzu: KuzuStore | None = None
+        self.hybrid_search: HybridSearchEngine | None = None
         self.subscriptions: SubscriptionManager | None = None
         self.ref_counter: RefCounter | None = None
         self.queue: BackpressureQueue | None = None
@@ -57,6 +63,8 @@ class Orchestrator:
         self.tombstone: TombstoneCascade | None = None
         self.journal_sync: JournalSync | None = None
         self.reindex_manager: ReindexManager | None = None
+        self.graph_extractor: GraphExtractor | None = None
+        self.community_summarizer: CommunitySummarizer | None = None
 
         self._tasks: list[asyncio.Task] = []
 
@@ -81,6 +89,13 @@ class Orchestrator:
 
         self.lance = LanceEngine(str(data_dir / "lance"))
         await self.lance.open()
+
+        self.kuzu = KuzuStore(str(data_dir / "kuzu"))
+        self.kuzu.open()
+
+        self.hybrid_search = HybridSearchEngine(
+            sqlite=self.engine, lance=self.lance, kuzu=self.kuzu, settings=self.settings
+        )
 
         self.subscriptions = SubscriptionManager(self.engine.db)
         self.ref_counter = RefCounter(self.engine.db)
@@ -130,6 +145,8 @@ class Orchestrator:
             self.subscriptions,
             threshold=self.settings.janitor_reindex_threshold,
         )
+        self.graph_extractor = GraphExtractor(self.engine, self.kuzu, self.settings)
+        self.community_summarizer = CommunitySummarizer(self.engine, self.kuzu, self.settings)
 
         # Background tasks
         self._tasks.append(asyncio.create_task(self._watch_loop(), name="watcher"))
@@ -153,6 +170,8 @@ class Orchestrator:
             await self.queue.close()
         if self.lance:
             await self.lance.close()
+        if self.kuzu:
+            self.kuzu.close()
         if self.engine:
             await self.engine.close()
 
@@ -194,6 +213,12 @@ class Orchestrator:
                     for file_id in pending[:5]:  # Process in small batches
                         logger.info("Re-indexing file %s", file_id)
                         await self.reindex_manager.mark_done(file_id)
+
+                # 4. GraphRAG slow Distillation background job
+                await self.graph_extractor.run_batch()
+
+                # 5. MS GraphRAG Community Summarization background job
+                await self.community_summarizer.run_batch()
 
         except asyncio.CancelledError:
             pass
