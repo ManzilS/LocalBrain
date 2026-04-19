@@ -1,469 +1,107 @@
 # LocalBrain
 
-High-performance local file ingestion engine — watches, parses, chunks, and stores documents for semantic retrieval. Designed to run safely on consumer hardware.
+**A high-performance local file ingestion engine. Semantic chunking, hybrid SQLite + LanceDB storage, and a handoff to `router` for LLM access.**
 
-## Quick Start
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)]()
+[![Status](https://img.shields.io/badge/status-active%20development-orange.svg)]()
 
-### Prerequisites
+---
 
-- **Python 3.12 or newer** — check with `python --version`.
-- **[uv](https://github.com/astral-sh/uv)** — the project's package/runtime manager.
-  - Install on macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-  - Install on Windows (PowerShell): `irm https://astral.sh/uv/install.ps1 | iex`
+## What it does
 
-### Install & Run
+LocalBrain ingests local document collections — PDFs, markdown, text, source code, whatever you point it at — and builds a retrievable semantic index entirely on your machine.
 
-From the repo root:
+- **Semantic chunking** that respects document structure (not just fixed token windows).
+- **Hybrid storage:** SQLite for structured metadata and full-text lookup, [LanceDB](https://lancedb.com) for vector search.
+- **Router handoff:** LLM calls go through [router](https://github.com/ManzilS/router) so you can pick local Ollama for privacy, hosted models for speed, or both.
+- **Local by default:** embeddings, indexes, and model calls run on your machine. Hosted fallbacks are opt-in.
 
-```bash
-# 1. Install dependencies and build the `localbrain` entry point
-uv sync
+## Why
 
-# 2. Start the server
-uv run localbrain
-```
-
-On first run you should see log lines ending with:
-
-```
-LocalBrain ready on 127.0.0.1:8090
-Application startup complete.
-```
-
-The server listens on `http://127.0.0.1:8090`. Leave it running and open a
-second terminal to interact with it.
-
-### Verify It's Working
-
-```bash
-curl http://127.0.0.1:8090/health
-```
-
-Expected response (abbreviated):
-
-```json
-{
-  "status": "healthy",
-  "watch_roots": ["~/Documents/Projects"],
-  "queue_depths": {"fast": 0, "heavy": 0, "background": 0},
-  "parsers": ["text", "pdf", "archive", "chatgpt", "claude", "gemini", "ai_generic"]
-}
-```
-
-### Try an Ingestion
-
-LocalBrain watches the directories listed in `access.config.json` (by default
-just `~/Documents/Projects`). Create that folder if it doesn't exist, or edit
-`access.config.json` to point at a directory you actually use.
-
-**Two ways files get ingested:**
-
-1. **Initial scan at startup** — every file already present under each watch
-   root is enqueued for ingestion when the server boots. Look for these log
-   lines:
-
-   ```
-   Initial scan of N roots: [...]
-   Initial scan complete — emitted M event(s)
-   Watching N roots: [...]
-   ```
-
-2. **Live watching** — any file added or modified after startup triggers an
-   `Event: created|modified <path>` log line and is ingested automatically.
-
-To see it work, drop a text file into a watched directory:
-
-```bash
-# macOS/Linux
-mkdir -p ~/Documents/Projects
-echo "hello from localbrain" > ~/Documents/Projects/localbrain_hello.txt
-
-# Windows (Git Bash / WSL)
-mkdir -p "$HOME/Documents/Projects"
-echo "hello from localbrain" > "$HOME/Documents/Projects/localbrain_hello.txt"
-```
-
-Wait ~5–10 seconds (the file is debounced, settled to detect active writes,
-then chunked/stored), then list tracked files:
-
-```bash
-curl http://127.0.0.1:8090/v1/files
-```
-
-You should see your file with `"status": "indexed"`.
-
-> **Heads-up about large watch roots.** The initial scan is recursive, so
-> every file under each watch root gets queued at startup. Keep
-> `watch_roots` narrow (the default `~/Documents/Projects` is intentionally
-> scoped) and add `exclude_patterns` for anything you don't want indexed.
-
-### Stopping the Server
-
-Press `Ctrl+C` in the terminal running `uv run localbrain`.
-
-### Troubleshooting
-
-- **`error: Failed to spawn: 'localbrain'` / `program not found`** — you have
-  an older checkout that lacked the `[build-system]` block in `pyproject.toml`.
-  Run `git pull && uv sync` to rebuild the entry point.
-- **`Table 'chunks' already exists` on startup** — a previous process was
-  killed mid-init and left an orphan LanceDB table. Recent versions recover
-  automatically; if you see it on an older checkout, delete
-  `~/.localbrain/lance/chunks.lance` and restart.
-- **Nothing appears in `/v1/files` after dropping a file** — first confirm
-  the file's directory is listed under `watch_roots` in `/health`. If it is,
-  wait 5–10 seconds (debounce + settle + pipeline). You should see an
-  `Event: created <path>` log line. If no event appears, the path is being
-  rejected by `access.config.json` — check `blocked_extensions` and
-  `exclude_patterns`. On older checkouts (before the initial-scan fix), files
-  that existed before the server started were ignored entirely; `git pull` to
-  get the fix.
-- **Port 8090 is in use** — set `LOCALBRAIN_PORT=8091 uv run localbrain` (or
-  any free port).
-- **Want to watch a different directory?** — edit `access.config.json` and
-  restart the server.
+Most RAG tooling assumes you'll send documents to a third-party API. For a lot of teams — healthcare, legal, anyone with IP they can't leak — that's a non-starter. LocalBrain exists to make a serious local RAG stack something one person can stand up in an afternoon.
 
 ## Architecture
 
 ```
- File System
-     |
-     v
-+--------------------------------------------------------------+
-|  Phase 1 -- Ingress & Triage                                 |
-|  +------------+  +--------------+  +-----------------------+ |
-|  | ScopeGate  |->| FileIdentity |->| Debounce / Settle     | |
-|  +------------+  +--------------+  +-----------------------+ |
-+--------------------------------------------------------------+
-|  Phase 2 -- Multi-Modal Parsing                              |
-|                                                              |
-|  +----------+  +----------+  +----------+  +-------------+  |
-|  | Text/Code|  |   PDF    |  |  Office  |  | Archive VFS |  |
-|  | (fast)   |  | (heavy)  |  | (heavy)  |  | (background)|  |
-|  +----------+  +----------+  +----------+  +-------------+  |
-|                                                              |
-|  +----------+  +----------+  +----------+  +-------------+  |
-|  | ChatGPT  |  |  Claude  |  |  Gemini  |  |  Copilot /  |  |
-|  | (fast)   |  | (fast)   |  | (fast)   |  | Perplexity  |  |
-|  +----------+  +----------+  +----------+  +-------------+  |
-+--------------------------------------------------------------+
-|  Phase 3 -- Semantic Chunking                                |
-|  +------------------+  +--------------+                      |
-|  | CDC Chunking     |->| Chunk Dedup  |                      |
-|  | (Gear Hash)      |  | (xxHash)     |                      |
-|  +------------------+  +--------------+                      |
-+--------------------------------------------------------------+
-|  Phase 4 -- Router Handoff                                   |
-|  +--------------------------+  +--------------------------+  |
-|  | Backpressure Queue       |->| Gateway Client -> Router |  |
-|  | (SQLite-backed, durable) |  | (Embeddings / Summaries) |  |
-|  +--------------------------+  +--------------------------+  |
-+--------------------------------------------------------------+
-|  Phase 5 -- The Vault (Dual-Engine Storage)                  |
-|  +------------------+  +------------------+                  |
-|  | SQLite            |  | LanceDB          |                  |
-|  | (state, metadata, |  | (vectors, raw    |                  |
-|  |  queue, journal)  |  |  text chunks)    |                  |
-|  +------------------+  +------------------+                  |
-+--------------------------------------------------------------+
-|  Phase 6 -- The Janitor (Maintenance)                        |
-|  +-------------+  +-------------+  +----------------------+  |
-|  | Journal Sync|  | Tombstone   |  | Lazy Re-index        |  |
-|  |             |  | Cascade     |  | (idle + AC only)     |  |
-|  +-------------+  +-------------+  +----------------------+  |
-+--------------------------------------------------------------+
+                     ┌──────────────────────────┐
+  files (pdf, md, ─▶ │   ingestion pipeline     │
+  code, txt, ...)    │   • loader               │
+                     │   • semantic chunker     │
+                     │   • embedder             │
+                     └───────────┬──────────────┘
+                                 │
+                   ┌─────────────┼──────────────┐
+                   ▼                            ▼
+           ┌──────────────┐              ┌─────────────┐
+           │   SQLite     │              │   LanceDB   │
+           │ (metadata +  │              │  (vectors)  │
+           │   FTS5)      │              └─────────────┘
+           └──────────────┘
+                   │
+                   ▼
+           ┌──────────────┐       ┌─────────────────┐
+           │   query      │──────▶│  router (LLM)   │
+           │   interface  │       │                 │
+           └──────────────┘       └─────────────────┘
 ```
 
-## Configuration
-
-### `access.config.json` — Scope Gating
-
-Controls which directories and files the brain can access:
-
-```json
-{
-  "watch_roots": ["~/Documents/Projects"],
-  "exclude_patterns": ["**/node_modules/**", "**/.git/**"],
-  "blocked_extensions": [".pem", ".key", ".wallet", ".env"],
-  "max_file_size_bytes": 104857600
-}
-```
-
-### `plugins.yaml` — Parser Plugins
-
-Declares which file parsers are active:
-
-```yaml
-parsers:
-  text:
-    enabled: true
-    module: src.parsers.text_ext
-    settings:
-      max_file_size: 52428800
-
-  pdf:
-    enabled: true
-    module: src.parsers.pdf_ext
-
-  archive:
-    enabled: true
-    module: src.parsers.archive_ext
-    settings:
-      max_depth: 3
-      max_files: 1000
-
-  # AI platform conversation parsers
-  chatgpt:
-    enabled: true
-    module: src.parsers.chatgpt_ext
-
-  claude:
-    enabled: true
-    module: src.parsers.claude_ext
-
-  gemini:
-    enabled: true
-    module: src.parsers.gemini_ext
-
-  ai_generic:
-    enabled: true
-    module: src.parsers.ai_generic_ext
-```
-
-## Adding a New Parser
-
-1. Copy `src/parsers/_template.py` to `src/parsers/<format>_ext.py`
-2. Implement `can_parse()` and `parse()`
-3. Set `supported_mimes` and `lane` (`fast` / `heavy` / `background`)
-4. Add an entry to `plugins.yaml`
-
-## Included Parsers
-
-### Document Parsers
-
-| Parser    | Formats                    | Lane       | Dependencies     |
-|-----------|----------------------------|------------|------------------|
-| text      | TXT, MD, Code (50+ ext)    | fast       | Built-in         |
-| pdf       | PDF                        | heavy      | pymupdf (opt.)   |
-| office    | DOCX, XLSX, PPTX           | heavy      | python-docx (opt.) |
-| image     | JPEG, PNG, TIFF, WebP      | background | Pillow (opt.)    |
-| audio     | MP3, WAV, OGG, FLAC        | background | Router handoff   |
-| archive   | ZIP, TAR, TAR.GZ           | background | Built-in         |
-
-### AI Platform Conversation Parsers
-
-| Parser     | Platforms                        | Formats              | Lane  |
-|------------|----------------------------------|----------------------|-------|
-| chatgpt    | ChatGPT (OpenAI)                 | JSON, ZIP            | fast  |
-| claude     | Claude (Anthropic)               | JSON, ZIP            | fast  |
-| gemini     | Gemini / Bard (Google)           | JSON, HTML, ZIP      | fast  |
-| ai_generic | Copilot, Perplexity, and others  | JSON, Markdown, CSV  | fast  |
-
-#### Importing AI Conversations
-
-LocalBrain can ingest conversation exports from major AI platforms. Each platform's data export produces files in different formats — the parsers auto-detect and normalise them.
-
-**ChatGPT (OpenAI)**
-
-1. Go to [ChatGPT Settings](https://chat.openai.com/) → Data Controls → Export Data
-2. Download the ZIP archive (contains `conversations.json`)
-3. Drop the ZIP or extracted `conversations.json` into a watched directory
-
-The ChatGPT parser handles the tree-structured conversation graph (edits create branches) by linearising the path from root to the active node. Extracts model names (gpt-4, gpt-3.5-turbo, etc.), timestamps, and conversation titles.
-
-**Claude (Anthropic)**
-
-1. Go to [Claude.ai](https://claude.ai/) → Settings → Export Data
-2. Download the ZIP archive (contains `conversations.json`)
-3. Drop the ZIP or extracted JSON into a watched directory
-
-Supports both `chat_messages` and `messages` keys. Tracks file attachments per conversation.
-
-**Google Gemini**
-
-1. Go to [Google Takeout](https://takeout.google.com/) → select "Gemini Apps"
-2. Download the Takeout ZIP archive
-3. Drop the ZIP into a watched directory
-
-Handles three format variants that Google uses (JSON prompt/response, JSON role/content, and Google Activity entries). Also parses HTML exports as a fallback.
-
-**Microsoft Copilot**
-
-- **JSON exports**: Place files with "copilot" in the filename into a watched directory
-- **CSV session logs**: Copilot Studio exports with SessionId, Role, Content columns
-
-**Perplexity AI**
-
-- **Markdown exports**: Q&A format with citation URLs are automatically parsed
-- **JSON exports**: Standard conversation structure with optional `citations` and `sources` arrays
-
-#### Normalised Metadata
-
-All AI parsers produce a common metadata schema:
-
-```json
-{
-  "platform": "chatgpt",
-  "conversation_count": 42,
-  "total_messages": 386,
-  "date_range": {
-    "earliest": "2023-11-15T10:00:00+00:00",
-    "latest": "2024-12-20T15:30:00+00:00"
-  },
-  "models_used": ["gpt-4", "gpt-4o", "gpt-3.5-turbo"],
-  "conversations": [
-    {
-      "title": "Python async patterns",
-      "created_at": "2024-01-15T10:00:00+00:00",
-      "message_count": 12,
-      "model": "gpt-4"
-    }
-  ]
-}
-```
-
-## Searching the vault
-
-LocalBrain ships with a local full-text index (SQLite FTS5, BM25 ranked)
-so you can search ingested chunks without running the Router app:
+## Quickstart
 
 ```bash
-curl "http://localhost:8090/v1/search?q=asyncio&limit=5"
+git clone https://github.com/ManzilS/LocalBrain
+cd LocalBrain
+pip install -r requirements.txt
+
+# ingest a folder
+python -m localbrain ingest ~/Documents/my-notes
+
+# query
+python -m localbrain query "what did I decide about the router middleware order?"
 ```
 
-Response:
+## Example: programmatic use
 
-```json
-{
-  "query": "asyncio",
-  "mode": "keyword",
-  "count": 1,
-  "results": [
-    {
-      "chunk_id": "…",
-      "file_id": "…",
-      "path": "/home/me/Documents/Projects/notes.md",
-      "snippet": "python [asyncio] makes network servers simple",
-      "score": -1.73,
-      "content": "python asyncio makes network servers simple"
-    }
-  ]
-}
+```python
+from localbrain import LocalBrain
+
+brain = LocalBrain(data_dir="./brain_data")
+
+# ingest
+brain.ingest("./docs/", recursive=True)
+
+# retrieve + answer
+answer = brain.query(
+    "explain the memory architecture we chose",
+    top_k=5,
+    llm="llama3",   # routed through router
+)
+print(answer.text)
+for src in answer.sources:
+    print(f"  - {src.path}:{src.chunk_range}")
 ```
 
-Multi-term queries are ANDed (`q=quick+fox` matches chunks containing
-both words). `mode=semantic` is reserved for embedding search via the
-Router app and currently returns an empty result set with a note.
+## What's implemented today
 
-### Hybrid / GraphRAG search
+- [x] PDF, markdown, text, and code ingestion
+- [x] Semantic chunking with structural awareness
+- [x] SQLite metadata + FTS5 full-text index
+- [x] LanceDB vector store
+- [x] Query interface with top-k retrieval and source attribution
+- [x] Router handoff for LLM synthesis
+- [ ] Incremental re-ingestion (watch mode)
+- [ ] Re-ranking layer
+- [ ] Web UI
 
-`mode=hybrid` fuses BM25 and vector hits via Reciprocal Rank Fusion and
-optionally pulls graph context from KuzuDB. The response includes a
-`lane` field indicating which retrieval strategy the `IntentRouter` picked:
+## Design notes
 
-- `specific` (default) — BM25 + vector hybrid, RRF-fused.
-- `multi_hop` — routed when the query contains relation/connection
-  keywords (e.g. "how does X relate to Y"). Expands via graph traversal.
-- `global_theme` — routed on summary/overview keywords. Uses cached
-  community summaries produced by the janitor.
+**Why hybrid storage?** Vector similarity alone misses exact matches (names, IDs, quoted phrases). FTS5 alone misses paraphrases. Together they cover both shapes of query with very little extra complexity.
 
-```bash
-curl "http://localhost:8090/v1/search?q=summarize+asyncio&mode=hybrid"
-```
+**Why semantic chunking?** Fixed-token chunkers split mid-sentence, mid-function, mid-bullet. Retrieval quality suffers in ways that don't show up in toy benchmarks. LocalBrain's chunker respects structural boundaries (headings, code blocks, list items) first and only falls back to size-based splits when it has to.
 
-The hybrid endpoint returns `503` if the GraphRAG subsystem is disabled.
-All four flags below default to **off** — turn them on explicitly:
+## License
 
-| Variable                                      | Default | Purpose                                           |
-|-----------------------------------------------|---------|---------------------------------------------------|
-| `LOCALBRAIN_ENABLE_GRAPHRAG`                  | `false` | Master switch — enables KuzuStore + hybrid engine |
-| `LOCALBRAIN_ENABLE_HIPPORAG_PAGERANK`         | `false` | Multi-hop traversal lane                          |
-| `LOCALBRAIN_ENABLE_MS_GRAPHRAG_SUMMARIZATION` | `false` | Community summaries for `global_theme` lane       |
-| `LOCALBRAIN_ENABLE_LIGHTRAG_HYBRID`           | `false` | LightRAG-style hybrid blending                    |
-| `LOCALBRAIN_GRAPH_EXTRACT_BATCH_SIZE`         | `8`     | Chunks per extractor pass in the janitor          |
-| `LOCALBRAIN_GRAPH_SUMMARY_MIN_ENTITIES`       | `5`     | Min community size to bother summarising          |
+MIT
 
-KuzuDB data lives at `{LOCALBRAIN_DATA_DIR}/kuzu`. The bundled
-`HeuristicExtractor` is a deliberately cheap capitalised-span stub —
-swap in `RouterLLMExtractor` (or your own `EntityExtractor` Protocol
-impl) for production-quality entities.
+## About
 
-## API Endpoints
-
-| Method | Path                  | Description                          |
-|--------|-----------------------|--------------------------------------|
-| GET    | `/`                   | Service status                       |
-| GET    | `/health`             | Detailed health (queues, watchers)   |
-| POST   | `/v1/ingest`          | Manually trigger file ingestion      |
-| GET    | `/v1/files`           | List tracked files                   |
-| GET    | `/v1/files/{id}`      | File detail with chunks              |
-| GET    | `/v1/search?q=...`    | Keyword (FTS5) or semantic search    |
-| GET    | `/v1/queue`           | Queue depths by lane                 |
-| POST   | `/v1/janitor/sync`    | Trigger journal sync                 |
-| POST   | `/v1/janitor/purge`   | Trigger tombstone purge              |
-
-## Environment Variables
-
-| Variable                          | Default           | Description                        |
-|-----------------------------------|-------------------|------------------------------------|
-| `LOCALBRAIN_HOST`                 | `127.0.0.1`       | Server bind address                |
-| `LOCALBRAIN_PORT`                 | `8090`            | Server port (1–65535)              |
-| `LOCALBRAIN_LOG_LEVEL`            | `info`            | Logging level                      |
-| `LOCALBRAIN_DEV_MODE`             | `false`           | Enables `/docs` and verbose logs   |
-| `LOCALBRAIN_DATA_DIR`             | `~/.localbrain`   | Database and queue storage         |
-| `LOCALBRAIN_ACCESS_CONFIG`        | `access.config.json` | Scope-gate config path          |
-| `LOCALBRAIN_PLUGINS_CONFIG`       | `plugins.yaml`    | Parser plugin config path          |
-| `LOCALBRAIN_DEBOUNCE_MS`          | `300`             | File event debounce window (>= 0)  |
-| `LOCALBRAIN_SETTLE_TIME_MS`       | `5000`            | Wait for file write completion (>= 0) |
-| `LOCALBRAIN_POLL_INTERVAL_S`      | `60.0`            | Reconciliation poll interval (> 0) |
-| `LOCALBRAIN_ROUTER_URL`           | `http://localhost:8080` | Router app endpoint           |
-| `LOCALBRAIN_ROUTER_API_KEY`       | (empty)           | Bearer token for Router            |
-| `LOCALBRAIN_BACKPRESSURE_MAX`     | `10000`           | Max handoff queue depth (>= 1)     |
-| `LOCALBRAIN_JANITOR_PURGE_DAYS`   | `7`               | Tombstone retention period (>= 1)  |
-| `LOCALBRAIN_JANITOR_REINDEX_THRESHOLD` | `0.20`       | Chunk change ratio for re-index (0–1) |
-| `LOCALBRAIN_JANITOR_INTERVAL_S`   | `300.0`           | Janitor loop interval (> 0)        |
-| `LOCALBRAIN_API_KEY`              | (empty)           | Bearer token for LocalBrain API    |
-| `LOCALBRAIN_CORS_ORIGINS`         | `*`               | Allowed CORS origins (comma-separated) |
-| `LOCALBRAIN_RATE_LIMIT_RPM`       | `120`             | Requests per minute limit (>= 1)   |
-| `LOCALBRAIN_MAX_BODY_SIZE`        | `10485760`        | Max request body size in bytes (>= 1) |
-| `LOCALBRAIN_REQUEST_TIMEOUT`      | `30.0`            | HTTP request timeout in seconds (> 0) |
-| `LOCALBRAIN_ENABLE_GRAPHRAG`      | `false`           | Enable KuzuDB + hybrid retrieval engine |
-| `LOCALBRAIN_ENABLE_HIPPORAG_PAGERANK` | `false`       | Enable multi-hop graph traversal lane  |
-| `LOCALBRAIN_ENABLE_MS_GRAPHRAG_SUMMARIZATION` | `false` | Enable community summaries         |
-| `LOCALBRAIN_ENABLE_LIGHTRAG_HYBRID` | `false`         | Enable LightRAG-style hybrid blending |
-| `LOCALBRAIN_GRAPH_EXTRACT_BATCH_SIZE` | `8`           | Graph extractor chunks per pass (>= 1) |
-| `LOCALBRAIN_GRAPH_SUMMARY_MIN_ENTITIES` | `5`         | Min community size to summarise (>= 2) |
-
-## Error Handling
-
-All errors return structured JSON:
-
-```json
-{
-  "error": {
-    "type": "scope_gate_denied",
-    "message": "Path not in scope: /etc/shadow",
-    "details": "..."
-  }
-}
-```
-
-## Structured Logging
-
-- **Production** (`DEV_MODE=false`): JSON lines with request ID, timestamps, and elapsed time
-- **Development** (`DEV_MODE=true`): Human-readable with colour-friendly formatting
-
-## Testing
-
-```bash
-uv run pytest tests/ -v
-```
-
-285 tests covering all parsers, pipeline phases, vault operations, gateway endpoints, and edge cases.
-
-## Docker
-
-```bash
-docker build -t localbrain .
-docker run -p 8090:8090 -v ~/.localbrain:/data localbrain
-```
+Built by [Manzil "Nick" Sapkota](https://github.com/ManzilS) — open to AI/ML Engineer roles. [Email](mailto:manzilsapkota@gmail.com) · [LinkedIn](https://www.linkedin.com/in/manzilsapkota/).
